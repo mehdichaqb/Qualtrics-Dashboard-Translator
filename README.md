@@ -10,7 +10,8 @@ A local Streamlit app that translates Qualtrics survey/dashboard CSV and XLSX fi
 - **Provenance tracking** shows how each cell was translated (reference match, cache, fresh)
 - **Structural validation** ensures row/column counts, headers, and ordering are preserved
 - **UTF-8 CSV export** with optional BOM for Excel compatibility
-- **Swappable translation backend** (Anthropic Claude API or mock for testing)
+- **Free offline translation** via argos-translate (no API key needed)
+- **Swappable translation backend** (argos-translate, Anthropic Claude API, or mock)
 
 ## Project Structure
 
@@ -53,22 +54,15 @@ cd Qualtrics-Dashboard-Translator
 pip install -r requirements.txt
 ```
 
-### 2. Configure API key (optional)
+### 2. Translation works out of the box
 
-Copy `.env.example` to `.env` and add your Anthropic API key:
+The default provider is **argos-translate** (offline, free). On first run it will download the EN/FR language models (~100MB, one time only). No API key needed.
 
-```bash
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
-```
-
-Or set the environment variable directly:
+**Optional**: To use Anthropic Claude API instead, set an API key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
-
-Without an API key, the app falls back to a mock translator (prefixes `[FR-CA]`).
 
 ### 3. Run the app
 
@@ -121,13 +115,14 @@ The translator uses a provider pattern. To add a new provider:
 3. Register it in the `get_translator()` factory function
 
 Built-in providers:
-- `AnthropicTranslator` - uses Claude API with batched numbered-list prompts
+- `ArgosTranslator` - **default**, free offline translation via argos-translate
+- `AnthropicTranslator` - uses Claude API (requires key), batched numbered-list prompts
 - `MockTranslator` - for testing, prefixes `[FR-CA]`
 
 ## Limitations & Edge Cases
 
-- **No internet?** Falls back to mock translator
-- **Very large files** (10k+ rows) may be slow with the API due to per-cell translation
+- **First run** downloads ~100MB language model (cached locally after that)
+- **Very large files** (10k+ rows) are fast with argos (local), slower with Anthropic API
 - **HTML in cells** is preserved structurally but complex nested HTML may need manual review
 - **Fuzzy matching** is intentionally conservative to avoid injecting incorrect survey wording
 - **Multiple target locales** are not translated simultaneously; process one direction at a time
@@ -135,7 +130,6 @@ Built-in providers:
 
 ## Next Improvements
 
-- Batch API calls more aggressively (group 50+ cells per request)
 - Add Google Translate / DeepL / Azure provider options
 - Support translating multiple target locale columns in one pass
 - Add diff view comparing original vs translated side-by-side

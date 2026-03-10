@@ -2,6 +2,9 @@ streamlit>=1.30.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 chardet>=5.0.0
-anthropic>=0.40.0
+argostranslate>=1.9.0
 python-dotenv>=1.0.0
 pytest>=7.0.0
+
+# Optional: only needed if using the Anthropic API provider
+# anthropic>=0.40.0

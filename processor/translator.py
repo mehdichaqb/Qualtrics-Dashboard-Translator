@@ -2,8 +2,9 @@
 translator.py — Translation engine abstraction with provider pattern.
 
 Supports:
+  - ArgosTranslator (offline, free, via argos-translate)
   - MockTranslator (for tests)
-  - AnthropicTranslator (via Anthropic API)
+  - AnthropicTranslator (via Anthropic API, requires key)
 
 Easy to add new providers by subclassing TranslationProvider.
 """
@@ -17,12 +18,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-# Anthropic SDK import — optional at module level
+# Optional provider imports — guarded so missing packages don't crash the app
 try:
     import anthropic
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
+
+try:
+    import argostranslate.package
+    import argostranslate.translate
+    HAS_ARGOS = True
+except ImportError:
+    HAS_ARGOS = False
 
 
 @dataclass
@@ -85,8 +93,91 @@ class MockTranslator(TranslationProvider):
         return "mock"
 
 
+class ArgosTranslator(TranslationProvider):
+    """Offline translation via argos-translate. Free, no API key needed."""
+
+    # Map Qualtrics locale codes → argos ISO 639-1 codes
+    _LOCALE_TO_ARGOS = {
+        "EN": "en", "EN-GB": "en",
+        "FR": "fr", "FR-CA": "fr",
+        "ES": "es", "ES-ES": "es",
+        "DE": "de", "IT": "it", "PT": "pt", "PT-BR": "pt",
+        "AR": "ar", "ZH-S": "zh", "ZH-T": "zh",
+        "JA": "ja", "KO": "ko", "RU": "ru", "RU-RU": "ru",
+        "NL": "nl", "PL": "pl", "TR": "tr", "UK": "uk",
+        "SV": "sv", "DA": "da", "FI": "fi", "NO": "nb",
+        "CS": "cs", "EL": "el", "HU": "hu", "RO": "ro",
+        "HI": "hi", "ID": "id", "TH": "th", "VI": "vi",
+        "BG": "bg", "HR": "hr", "SK": "sk", "SL": "sl",
+        "HE": "he", "ET": "et", "LT": "lt", "LV": "lv",
+    }
+
+    def __init__(self) -> None:
+        if not HAS_ARGOS:
+            raise ImportError(
+                "argostranslate is required. Install with: pip install argostranslate"
+            )
+        # Ensure available packages index is fetched
+        argostranslate.package.update_package_index()
+        self._installed_langs: set = set()
+        self._ensure_languages_installed()
+
+    def _ensure_languages_installed(self) -> None:
+        """Download and install required language packages if missing."""
+        needed_pairs = [("en", "fr"), ("fr", "en")]
+        available = argostranslate.package.get_available_packages()
+        installed_pkgs = argostranslate.package.get_installed_packages()
+        installed_set = {(p.from_code, p.to_code) for p in installed_pkgs}
+
+        for src_code, tgt_code in needed_pairs:
+            if (src_code, tgt_code) in installed_set:
+                continue  # Already installed
+
+            pkg = next(
+                (p for p in available if p.from_code == src_code and p.to_code == tgt_code),
+                None,
+            )
+            if pkg:
+                argostranslate.package.install_from_path(pkg.download())
+
+    def _get_argos_code(self, qualtrics_code: str) -> str:
+        """Map a Qualtrics locale code to an argos language code."""
+        return self._LOCALE_TO_ARGOS.get(qualtrics_code.upper(), qualtrics_code.lower()[:2])
+
+    def translate_batch(
+        self, requests: List[TranslationRequest]
+    ) -> List[TranslationResult]:
+        return [self.translate_single(r) for r in requests]
+
+    def translate_single(self, request: TranslationRequest) -> TranslationResult:
+        src_code = self._get_argos_code(request.source_lang)
+        tgt_code = self._get_argos_code(request.target_lang)
+
+        try:
+            translated = argostranslate.translate.translate(
+                request.source_text, src_code, tgt_code
+            )
+            return TranslationResult(
+                source_text=request.source_text,
+                translated_text=translated,
+                provider=self.name,
+            )
+        except Exception as e:
+            return TranslationResult(
+                source_text=request.source_text,
+                translated_text=request.source_text,
+                provider=self.name,
+                success=False,
+                error=str(e),
+            )
+
+    @property
+    def name(self) -> str:
+        return "argos"
+
+
 class AnthropicTranslator(TranslationProvider):
-    """Translation via Anthropic Claude API."""
+    """Translation via Anthropic Claude API (requires API key)."""
 
     def __init__(
         self,
@@ -274,17 +365,25 @@ def get_translator(provider: str = "auto", api_key: Optional[str] = None) -> Tra
     """
     Factory function to get a translation provider.
 
-    *provider* can be: "auto", "anthropic", "mock".
-    "auto" tries Anthropic first, falls back to mock.
+    *provider* can be: "auto", "argos", "anthropic", "mock".
+    "auto" tries argos first (free/offline), then anthropic, then mock.
     """
     if provider == "mock":
         return MockTranslator()
 
+    if provider == "argos":
+        return ArgosTranslator()
+
     if provider == "anthropic":
         return AnthropicTranslator(api_key=api_key)
 
-    # Auto: try anthropic, fall back to mock
+    # Auto: try argos (free) → anthropic (if key set) → mock
     if provider == "auto":
+        if HAS_ARGOS:
+            try:
+                return ArgosTranslator()
+            except Exception:
+                pass
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if key and HAS_ANTHROPIC:
             try:
