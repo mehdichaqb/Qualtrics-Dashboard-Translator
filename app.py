@@ -17,7 +17,6 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-@@ -19,48 +18,205 @@
 from processor.detector import FileType, detect_file_type, find_locale_columns
 from processor.file_loader import load_file
 from processor.pipeline import PipelineConfig, PipelineResult, run_pipeline
