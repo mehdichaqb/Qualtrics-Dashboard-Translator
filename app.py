@@ -356,21 +356,30 @@ def render_header() -> None:
 ''', unsafe_allow_html=True)
 
 def render_sidebar() -> tuple[bool, str, str]:
+    # Resolve API key from secrets → env → empty
+    _secret_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+    _env_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    _default_key = _secret_key or _env_key
+
     with st.sidebar:
         st.markdown("### Advanced Settings")
         encoding_choice = st.selectbox("Export Encoding",
             options=["UTF-8 with BOM (recommended)","UTF-8"], index=0)
         use_bom = "BOM" in encoding_choice
         st.divider()
+        # Default to Claude if a key is available, otherwise offline
+        _default_engine_idx = 1 if _default_key else 0
         provider_choice = st.selectbox("Translation Engine", options=[
-            "Argos Translate \u2014 Offline (Recommended)",
-            "Anthropic API (requires key)", "Mock (for testing)"], index=0)
+            "Argos Translate \u2014 Offline",
+            "Claude (Anthropic API)", "Mock (for testing)"],
+            index=_default_engine_idx)
         provider = ("argos" if "Argos" in provider_choice
-                    else "anthropic" if "Anthropic" in provider_choice else "mock")
+                    else "anthropic" if "Claude" in provider_choice else "mock")
         api_key = ""
         if provider == "anthropic":
             api_key = st.text_input("Anthropic API Key", type="password",
-                                    value=os.environ.get("ANTHROPIC_API_KEY",""))
+                                    value=_default_key,
+                                    help="Pre-loaded from secrets. Change only if needed.")
         st.divider()
         st.caption("Token protection and HTML preservation are always enabled.")
     return use_bom, provider, api_key
