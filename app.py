@@ -17,6 +17,7 @@ from processor.file_loader import load_file
 from processor.pipeline import PipelineConfig, PipelineResult, run_pipeline
 from processor.reference_memory import TranslationMemory, build_memory_from_reference
 from processor.rules import Provenance
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
@@ -526,6 +527,37 @@ header [data-testid="stToolbar"] {
 }
 
 /* ══════════════════════════════════════════════════════════
+   FILE RESULT CARD — per-file result in multi-file mode
+   ══════════════════════════════════════════════════════════ */
+.file-result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 28px 0 8px 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+.file-result-header .file-index {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--red-soft);
+    color: var(--red);
+    font-size: 13px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+.file-result-header .file-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text) !important;
+    word-break: break-all;
+}
+
+/* ══════════════════════════════════════════════════════════
    STATS ROW
    FIX #1: value/label text uses vars
    FIX #8: accent border in light mode
@@ -723,7 +755,8 @@ section[data-testid="stSidebar"] p {
     .processing-card .title,
     .done-area h3,
     .memory-box .label,
-    .panel-hint strong {
+    .panel-hint strong,
+    .file-result-header .file-name {
         color: #F3F4F6 !important;
     }
     .app-header p,
@@ -761,27 +794,48 @@ def file_signature(uploaded_file) -> Optional[str]:
     return hashlib.sha256(uploaded_file.name.encode("utf-8") + b"::" + data).hexdigest()
 
 
-def rebuild_reference_memory(ref_labels_file, ref_data_file) -> TranslationMemory:
+def files_signature(uploaded_files: list) -> str:
+    """Create a combined signature for a list of uploaded files."""
+    if not uploaded_files:
+        return "none"
+    parts = [file_signature(f) for f in uploaded_files]
+    return "|".join(p for p in parts if p)
+
+
+def rebuild_reference_memory(
+    ref_labels_files: list,
+    ref_data_files: list,
+) -> TranslationMemory:
     """
     Always rebuild memory from the current uploaded reference files.
-    This avoids stale session-state flags when users replace files.
+    Accepts lists of files — all files in each list are loaded.
     """
     memory = TranslationMemory()
-    if ref_labels_file is not None:
-        label_df = load_file(io.BytesIO(ref_labels_file.getvalue()), file_name=ref_labels_file.name)
-        build_memory_from_reference(label_df, memory, "EN", "FR-CA")
-        build_memory_from_reference(label_df, memory, "EN", "FR")
-    if ref_data_file is not None:
-        data_df = load_file(io.BytesIO(ref_data_file.getvalue()), file_name=ref_data_file.name)
-        build_memory_from_reference(data_df, memory, "EN", "FR-CA")
-        build_memory_from_reference(data_df, memory, "EN", "FR")
+    for f in (ref_labels_files or []):
+        if f is None:
+            continue
+        try:
+            label_df = load_file(io.BytesIO(f.getvalue()), file_name=f.name)
+            build_memory_from_reference(label_df, memory, "EN", "FR-CA")
+            build_memory_from_reference(label_df, memory, "EN", "FR")
+        except Exception:
+            pass
+    for f in (ref_data_files or []):
+        if f is None:
+            continue
+        try:
+            data_df = load_file(io.BytesIO(f.getvalue()), file_name=f.name)
+            build_memory_from_reference(data_df, memory, "EN", "FR-CA")
+            build_memory_from_reference(data_df, memory, "EN", "FR")
+        except Exception:
+            pass
     return memory
 
 
-def reset_result_for(tab_key: str) -> None:
-    result_key = f"result_{tab_key}"
-    if result_key in st.session_state:
-        del st.session_state[result_key]
+def reset_result_for(panel_key: str) -> None:
+    for key in list(st.session_state.keys()):
+        if key.startswith(f"result_{panel_key}_"):
+            del st.session_state[key]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -847,7 +901,7 @@ def render_reference_upload() -> TranslationMemory:
     <h2>Upload Your Reference Files</h2>
     <p>
         Reference files allow the system to reuse existing translations
-        before generating new ones.
+        before generating new ones. You can upload multiple files in each slot.
     </p>
 </div>
 """,
@@ -859,7 +913,7 @@ def render_reference_upload() -> TranslationMemory:
             """
 <div class="ref-caption">
     <div class="title">Reference Label Files</div>
-    <div class="drag">Drag and drop file here</div>
+    <div class="drag">Drag and drop files here</div>
     <div class="detail">
         Previously translated Qualtrics label files with EN / FR / FR-CA locale values
     </div>
@@ -868,12 +922,13 @@ def render_reference_upload() -> TranslationMemory:
             unsafe_allow_html=True,
         )
         st.markdown('<div class="uploader-wrap">', unsafe_allow_html=True)
-        ref_labels_file = st.file_uploader(
+        ref_labels_files = st.file_uploader(
             "Reference Label Files",
             type=["csv", "xlsx"],
-            key="ref_labels_file",
+            key="ref_labels_files",
             label_visibility="collapsed",
             help="Optional translation memory source for label files.",
+            accept_multiple_files=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
     with col_right:
@@ -881,7 +936,7 @@ def render_reference_upload() -> TranslationMemory:
             """
 <div class="ref-caption">
     <div class="title">Reference Data Files</div>
-    <div class="drag">Drag and drop file here</div>
+    <div class="drag">Drag and drop files here</div>
     <div class="detail">
         Previously translated Qualtrics data files using the default value column as source
     </div>
@@ -890,38 +945,44 @@ def render_reference_upload() -> TranslationMemory:
             unsafe_allow_html=True,
         )
         st.markdown('<div class="uploader-wrap">', unsafe_allow_html=True)
-        ref_data_file = st.file_uploader(
+        ref_data_files = st.file_uploader(
             "Reference Data Files",
             type=["csv", "xlsx"],
-            key="ref_data_file",
+            key="ref_data_files",
             label_visibility="collapsed",
             help="Optional translation memory source for data files.",
+            accept_multiple_files=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    label_sig = file_signature(ref_labels_file)
-    data_sig = file_signature(ref_data_file)
+    label_sig = files_signature(ref_labels_files or [])
+    data_sig = files_signature(ref_data_files or [])
     combined_sig = f"{label_sig}|{data_sig}"
     if st.session_state.get("reference_memory_signature") != combined_sig:
         try:
-            st.session_state["memory"] = rebuild_reference_memory(ref_labels_file, ref_data_file)
+            st.session_state["memory"] = rebuild_reference_memory(
+                ref_labels_files or [], ref_data_files or []
+            )
             st.session_state["reference_memory_signature"] = combined_sig
         except Exception as exc:
             st.error(f"Error building reference memory: {exc}")
             st.session_state["memory"] = TranslationMemory()
 
     memory: TranslationMemory = st.session_state.get("memory", TranslationMemory())
-    labels_ok = ref_labels_file is not None
-    data_ok = ref_data_file is not None
+    labels_count = len(ref_labels_files) if ref_labels_files else 0
+    data_count = len(ref_data_files) if ref_data_files else 0
     total_entries = memory.data_file_entries + memory.label_file_entries
+
+    lbl_text = f"{labels_count} file{'s' if labels_count != 1 else ''} loaded" if labels_count else "not loaded"
+    dat_text = f"{data_count} file{'s' if data_count != 1 else ''} loaded" if data_count else "not loaded"
 
     status_html = f"""
 <div class="status-row">
-    <span class="status-pill {'ok' if labels_ok else 'warn'}">
-        {'&#10003;' if labels_ok else '&#9675;'} Label references {'loaded' if labels_ok else 'not loaded'}
+    <span class="status-pill {'ok' if labels_count else 'warn'}">
+        {'&#10003;' if labels_count else '&#9675;'} Label references {lbl_text}
     </span>
-    <span class="status-pill {'ok' if data_ok else 'warn'}">
-        {'&#10003;' if data_ok else '&#9675;'} Data references {'loaded' if data_ok else 'not loaded'}
+    <span class="status-pill {'ok' if data_count else 'warn'}">
+        {'&#10003;' if data_count else '&#9675;'} Data references {dat_text}
     </span>
 </div>
 <div class="memory-box">
@@ -941,6 +1002,7 @@ def render_file_selection(use_bom: bool, provider: str, api_key: str) -> None:
     <h2>Select the File You Want to Translate</h2>
     <p>
         Choose whether you are translating a Qualtrics Label File or a Qualtrics Data File.
+        You can upload multiple files to translate them all at once.
     </p>
 </div>
 """,
@@ -1016,7 +1078,6 @@ def _render_translate_panel(
     api_key: str,
 ) -> None:
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    # FIX #3: Use Unicode arrow &#10132; instead of any text-based icon
     st.markdown(
         f"""
 <div class="panel-card">
@@ -1026,33 +1087,46 @@ def _render_translate_panel(
         unsafe_allow_html=True,
     )
     st.markdown('<div class="panel-card"><div class="uploader-wrap">', unsafe_allow_html=True)
-    uploaded_file = st.file_uploader(
-        f"Upload {panel_key} file to translate",
+    uploaded_files = st.file_uploader(
+        f"Upload {panel_key} files to translate",
         type=["csv", "xlsx"],
-        key=f"{panel_key}_main_file",
+        key=f"{panel_key}_main_files",
         label_visibility="collapsed",
-        help=f"Upload the main {panel_key} file you want translated.",
+        help=f"Upload one or more {panel_key} files you want translated.",
+        accept_multiple_files=True,
     )
     st.markdown("</div></div>", unsafe_allow_html=True)
-    if uploaded_file is None:
+
+    if not uploaded_files:
         return
-    try:
-        preview_df = load_file(io.BytesIO(uploaded_file.getvalue()), file_name=uploaded_file.name)
-    except Exception as exc:
-        st.error(f"Error loading file: {exc}")
+
+    # ── Preview summary for all uploaded files ──────────────────────
+    total_rows = 0
+    valid_files = []
+    for uf in uploaded_files:
+        try:
+            df = load_file(io.BytesIO(uf.getvalue()), file_name=uf.name)
+            total_rows += len(df)
+            valid_files.append((uf, df))
+        except Exception as exc:
+            st.error(f"Error loading **{uf.name}**: {exc}")
+
+    if not valid_files:
         return
-    all_cols = list(preview_df.columns)
+
+    # Show aggregate stats
+    all_cols = list(valid_files[0][1].columns)
     target_cols = [c for c in all_cols if c.strip().upper() in ("FR", "FR-CA")]
     st.markdown(
         f"""
 <div class="stats-row">
     <div class="stat-card">
-        <div class="value">{len(preview_df):,}</div>
-        <div class="label">Rows</div>
+        <div class="value">{len(valid_files)}</div>
+        <div class="label">Files</div>
     </div>
     <div class="stat-card">
-        <div class="value">{len(all_cols)}</div>
-        <div class="label">Columns</div>
+        <div class="value">{total_rows:,}</div>
+        <div class="label">Total Rows</div>
     </div>
     <div class="stat-card">
         <div class="value">{source_display}</div>
@@ -1062,10 +1136,19 @@ def _render_translate_panel(
 """,
         unsafe_allow_html=True,
     )
-    with st.expander("Preview first 8 rows"):
-        st.dataframe(preview_df.head(8), use_container_width=True, hide_index=True)
+
+    if len(valid_files) == 1:
+        uf, df = valid_files[0]
+        with st.expander("Preview first 8 rows"):
+            st.dataframe(df.head(8), use_container_width=True, hide_index=True)
+    else:
+        with st.expander(f"Preview files ({len(valid_files)} uploaded)"):
+            for i, (uf, df) in enumerate(valid_files, 1):
+                st.markdown(f"**{i}. {uf.name}** — {len(df):,} rows")
+                st.dataframe(df.head(4), use_container_width=True, hide_index=True)
+
     render_translation_controls(
-        uploaded_file=uploaded_file,
+        valid_files=valid_files,
         file_type=file_type,
         source_col_override=source_col_override,
         target_cols=target_cols,
@@ -1077,7 +1160,7 @@ def _render_translate_panel(
 
 
 def render_translation_controls(
-    uploaded_file,
+    valid_files: list,
     file_type: FileType,
     source_col_override: Optional[str],
     target_cols: list[str],
@@ -1094,47 +1177,71 @@ def render_translation_controls(
 """,
         unsafe_allow_html=True,
     )
+
+    n = len(valid_files)
+    btn_label = f"Translate {n} File{'s' if n != 1 else ''}"
     translate_clicked = st.button(
-        "Translate File",
+        btn_label,
         key=f"translate_button_{panel_key}",
         type="primary",
         use_container_width=True,
     )
+
     if translate_clicked:
-        config = PipelineConfig(
-            file_type_override=file_type,
-            source_lang="EN",
-            target_lang="FR-CA",
-            target_columns=target_cols if target_cols else ["FR", "FR-CA"],
-            source_column_override=source_col_override,
-            use_bom=use_bom,
-            provider=provider,
-            api_key=api_key if api_key else None,
+        for i, (uf, _df) in enumerate(valid_files):
+            result_key = f"result_{panel_key}_{i}"
+            config = PipelineConfig(
+                file_type_override=file_type,
+                source_lang="EN",
+                target_lang="FR-CA",
+                target_columns=target_cols if target_cols else ["FR", "FR-CA"],
+                source_column_override=source_col_override,
+                use_bom=use_bom,
+                provider=provider,
+                api_key=api_key if api_key else None,
+            )
+            render_processing_ui(uf, config, result_key)
+
+    # ── Show results for each file ────────────────────────────────
+    any_result = False
+    for i, (uf, _df) in enumerate(valid_files):
+        result_key = f"result_{panel_key}_{i}"
+        if result_key not in st.session_state:
+            continue
+        any_result = True
+        result: PipelineResult = st.session_state[result_key]
+
+        if len(valid_files) > 1:
+            st.markdown(
+                f"""
+<div class="file-result-header">
+    <span class="file-index">{i + 1}</span>
+    <span class="file-name">{uf.name}</span>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+        if result.validation.passed:
+            st.success("Validation passed. File structure and integrity were preserved.")
+        else:
+            st.error("Validation failed.")
+            for issue in result.validation.issues:
+                st.warning(issue)
+
+        prov_counts: dict[str, int] = {}
+        for item in result.translations:
+            prov_counts[item.provenance.value] = prov_counts.get(item.provenance.value, 0) + 1
+        ref_count = (
+            prov_counts.get("reference_exact_match", 0)
+            + prov_counts.get("reference_normalized_match", 0)
         )
-        render_processing_ui(uploaded_file, config, panel_key)
+        cache_count = prov_counts.get("session_cache", 0)
+        fresh_count = prov_counts.get("fresh_translation", 0)
+        skipped_count = sum(v for k, v in prov_counts.items() if "skipped" in k)
 
-    result_key = f"result_{panel_key}"
-    if result_key not in st.session_state:
-        return
-
-    result: PipelineResult = st.session_state[result_key]
-    if result.validation.passed:
-        st.success("Validation passed. File structure and integrity were preserved.")
-    else:
-        st.error("Validation failed.")
-        for issue in result.validation.issues:
-            st.warning(issue)
-
-    prov_counts: dict[str, int] = {}
-    for item in result.translations:
-        prov_counts[item.provenance.value] = prov_counts.get(item.provenance.value, 0) + 1
-    ref_count = prov_counts.get("reference_exact_match", 0) + prov_counts.get("reference_normalized_match", 0)
-    cache_count = prov_counts.get("session_cache", 0)
-    fresh_count = prov_counts.get("fresh_translation", 0)
-    skipped_count = sum(v for k, v in prov_counts.items() if "skipped" in k)
-
-    st.markdown(
-        f"""
+        st.markdown(
+            f"""
 <div class="prov-row">
     <div class="prov-card">
         <div class="value">{ref_count}</div>
@@ -1154,47 +1261,58 @@ def render_translation_controls(
     </div>
 </div>
 """,
-        unsafe_allow_html=True,
-    )
-    with st.expander("Translation Preview"):
-        interesting = [
-            t
-            for t in result.translations
-            if t.provenance
-            not in (
-                Provenance.SKIPPED_EMPTY,
-                Provenance.SKIPPED_NUMERIC,
-                Provenance.SKIPPED_INTERNAL,
-                Provenance.SKIPPED_PROTECTED,
-            )
-        ][:40]
-        if interesting:
-            preview_rows = [
-                {
-                    "Row": t.row_index,
-                    "Provenance": t.provenance.value.replace("_", " ").title(),
-                    "Original": t.original[:80],
-                    "Translated": t.translated[:80],
-                }
-                for t in interesting
-            ]
-            st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
-    with st.expander("Diagnostics & Notes"):
-        for k, v in sorted(result.diagnostics.items()):
-            st.text(f"{k}: {v}")
-        st.divider()
-        st.dataframe(result.notes_df, use_container_width=True, hide_index=True)
-    render_download_section(result, panel_key)
+            unsafe_allow_html=True,
+        )
+        with st.expander("Translation Preview"):
+            interesting = [
+                t
+                for t in result.translations
+                if t.provenance
+                not in (
+                    Provenance.SKIPPED_EMPTY,
+                    Provenance.SKIPPED_NUMERIC,
+                    Provenance.SKIPPED_INTERNAL,
+                    Provenance.SKIPPED_PROTECTED,
+                )
+            ][:40]
+            if interesting:
+                preview_rows = [
+                    {
+                        "Row": t.row_index,
+                        "Provenance": t.provenance.value.replace("_", " ").title(),
+                        "Original": t.original[:80],
+                        "Translated": t.translated[:80],
+                    }
+                    for t in interesting
+                ]
+                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+        with st.expander("Diagnostics & Notes"):
+            for k, v in sorted(result.diagnostics.items()):
+                st.text(f"{k}: {v}")
+            st.divider()
+            st.dataframe(result.notes_df, use_container_width=True, hide_index=True)
+
+        render_download_section(result, f"{panel_key}_{i}")
+
+    # ── If multiple results are available, offer a ZIP download ──────
+    if any_result and len(valid_files) > 1:
+        results_available = [
+            st.session_state[f"result_{panel_key}_{i}"]
+            for i in range(len(valid_files))
+            if f"result_{panel_key}_{i}" in st.session_state
+        ]
+        if len(results_available) > 1:
+            _render_bulk_download(results_available, panel_key)
 
 
-def render_processing_ui(uploaded_file, config: PipelineConfig, panel_key: str) -> None:
+def render_processing_ui(uploaded_file, config: PipelineConfig, result_key: str) -> None:
     status_box = st.empty()
     progress_box = st.empty()
     status_box.markdown(
-        """
+        f"""
 <div class="processing-card">
     <div class="title">Processing translation</div>
-    <div class="sub">Loading files, building memory, translating content, and exporting the result.</div>
+    <div class="sub">Translating <strong>{uploaded_file.name}</strong> — building memory, translating content, and exporting result.</div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -1212,17 +1330,17 @@ def render_processing_ui(uploaded_file, config: PipelineConfig, panel_key: str) 
             memory=st.session_state.get("memory"),
             progress_callback=update_progress,
         )
-        st.session_state[f"result_{panel_key}"] = result
+        st.session_state[result_key] = result
         progress.progress(1.0, text="Exporting result...")
         progress_box.empty()
         status_box.empty()
     except Exception as exc:
         progress_box.empty()
         status_box.empty()
-        st.error(f"Translation error: {exc}")
+        st.error(f"Translation error for **{uploaded_file.name}**: {exc}")
 
 
-def render_download_section(result: PipelineResult, panel_key: str) -> None:
+def render_download_section(result: PipelineResult, key_suffix: str) -> None:
     st.markdown(
         f"""
 <div class="done-area">
@@ -1240,7 +1358,7 @@ def render_download_section(result: PipelineResult, panel_key: str) -> None:
             data=result.translated_csv_bytes,
             file_name=result.translated_filename,
             mime="text/csv",
-            key=f"download_translated_{panel_key}",
+            key=f"download_translated_{key_suffix}",
             use_container_width=True,
         )
     with st.expander("Optional downloads and full output"):
@@ -1250,12 +1368,45 @@ def render_download_section(result: PipelineResult, panel_key: str) -> None:
             data=result.notes_csv_bytes,
             file_name=result.notes_filename,
             mime="text/csv",
-            key=f"download_notes_{panel_key}",
+            key=f"download_notes_{key_suffix}",
             use_container_width=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
         st.divider()
         st.dataframe(result.translated_df, use_container_width=True, hide_index=True)
+
+
+def _render_bulk_download(results: list[PipelineResult], panel_key: str) -> None:
+    """Offer a ZIP containing all translated CSVs when multiple files were processed."""
+    import zipfile
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+<div class="section-wrap" style="margin-top:32px;">
+    <h2>Download All Files</h2>
+    <p>Download all translated files as a single ZIP archive.</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for result in results:
+            zf.writestr(result.translated_filename, result.translated_csv_bytes)
+    zip_buf.seek(0)
+
+    dl_col_left, dl_col_mid, dl_col_right = st.columns([1, 2, 1])
+    with dl_col_mid:
+        st.download_button(
+            label=f"Download All {len(results)} Translated Files (.zip)",
+            data=zip_buf.getvalue(),
+            file_name=f"translated_{panel_key}_files.zip",
+            mime="application/zip",
+            key=f"download_zip_{panel_key}",
+            use_container_width=True,
+        )
 
 
 def render_footer() -> None:
