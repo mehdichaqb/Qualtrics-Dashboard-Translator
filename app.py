@@ -234,7 +234,15 @@ def init_stores() -> None:
         if gk not in st.session_state:
             st.session_state[gk] = 0
     if "glossary" not in st.session_state:
-        st.session_state["glossary"] = [{"EN": "", "FR-CA": "", "Note": ""}]
+        st.session_state["glossary"] = [
+            {"EN": "BDM",                             "FR-CA": "MVP",                                           "Note": "Benefits Delivery Modernization acronym"},
+            {"EN": "OAS",                             "FR-CA": "SV",                                            "Note": "Old Age Security acronym"},
+            {"EN": "EI",                              "FR-CA": "AE",                                            "Note": "Employment Insurance acronym"},
+            {"EN": "Benefits Delivery Modernization", "FR-CA": "Modernisation du versement des prestations",    "Note": "Full program name"},
+            {"EN": "survey",                          "FR-CA": "sondage",                                       "Note": ""},
+            {"EN": "onboarding",                      "FR-CA": "intégration",                                   "Note": ""},
+            {"EN": "",                                "FR-CA": "",                                               "Note": ""},
+        ]
 
 def sync_to_store(store_key: str, uploaded_files) -> bool:
     if not uploaded_files:
