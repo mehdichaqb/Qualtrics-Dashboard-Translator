@@ -40,6 +40,7 @@ class TranslationRequest:
     source_lang: str
     target_lang: str
     context: Optional[str] = None  # e.g. "survey question", "choice label"
+    glossary: Optional[Dict] = None  # EN term → FR-CA translation, injected into prompt
 
 
 @dataclass
@@ -227,6 +228,7 @@ class AnthropicTranslator(TranslationProvider):
         target_name = _lang_display_name(request.target_lang)
         source_name = _lang_display_name(request.source_lang)
 
+        glossary_block = _build_glossary_block(request.glossary)
         prompt = (
             f"Translate the following text from {source_name} to {target_name}.\n"
             f"Rules:\n"
@@ -236,8 +238,9 @@ class AnthropicTranslator(TranslationProvider):
             f"- Preserve tone and meaning\n"
             f"- Use Canadian French if target is French\n"
             f"- Do not add explanations — return only the translated text\n"
-            f"- Do not embellish or reformat\n\n"
-            f"Text to translate:\n{request.source_text}"
+            f"- Do not embellish or reformat\n"
+            + glossary_block +
+            f"\nText to translate:\n{request.source_text}"
         )
 
         for attempt in range(self._max_retries):
@@ -287,6 +290,7 @@ class AnthropicTranslator(TranslationProvider):
         for i, req in enumerate(chunk, 1):
             lines.append(f"{i}. {req.source_text}")
 
+        glossary_block = _build_glossary_block(chunk[0].glossary if chunk else None)
         prompt = (
             f"Translate each numbered line from {source_name} to {target_name}.\n"
             f"Rules:\n"
@@ -298,8 +302,9 @@ class AnthropicTranslator(TranslationProvider):
             f"- Do not add explanations\n"
             f"- Do not embellish or reformat\n"
             f"- Return ONLY numbered translations in the same order\n"
-            f"- Each line must start with the number followed by a period\n\n"
-            + "\n".join(lines)
+            f"- Each line must start with the number followed by a period\n"
+            + glossary_block +
+            "\n\n" + "\n".join(lines)
         )
 
         for attempt in range(self._max_retries):
@@ -393,6 +398,20 @@ def get_translator(provider: str = "auto", api_key: Optional[str] = None) -> Tra
         return MockTranslator()
 
     raise ValueError(f"Unknown translation provider: {provider}")
+
+
+def _build_glossary_block(glossary: Optional[Dict]) -> str:
+    """Build a glossary instruction block for the Claude prompt."""
+    if not glossary:
+        return ""
+    lines = [f"  - \"{en}\" → \"{fr}\"" for en, fr in glossary.items() if en and fr]
+    if not lines:
+        return ""
+    return (
+        "\n- You MUST use the following fixed translations exactly as given "
+        "(applies to exact terms and as substrings within longer text):\n"
+        + "\n".join(lines) + "\n"
+    )
 
 
 def _lang_display_name(code: str) -> str:

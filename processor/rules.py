@@ -130,6 +130,7 @@ def translate_cell(
         source_lang=source_lang,
         target_lang=target_lang,
         context=f"{file_type.value} / {column_name}",
+        glossary=memory.glossary_terms if memory.glossary_terms else None,
     )
 
     result = translator.translate_single(request)

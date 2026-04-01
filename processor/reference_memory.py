@@ -52,6 +52,9 @@ class TranslationMemory:
         # Stats
         self.data_file_entries: int = 0
         self.label_file_entries: int = 0
+        # User-defined glossary terms: EN term → FR-CA translation
+        # Injected into Claude prompts so substring matches are respected
+        self.glossary_terms: Dict[str, str] = {}
 
     def load_reference(
         self,

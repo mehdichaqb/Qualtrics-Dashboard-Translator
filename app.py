@@ -296,6 +296,12 @@ def get_or_build_memory() -> TranslationMemory:
                 build_memory_from_reference(gloss_fr_df, memory, "EN", "FR")
             except Exception:
                 pass
+            # Store glossary as term dict so Claude gets it injected into every prompt
+            memory.glossary_terms = {
+                r["EN"].strip(): r["FR-CA"].strip()
+                for r in valid_rows
+                if r.get("EN","").strip() and r.get("FR-CA","").strip()
+            }
         # 2. Reference files
         for store_key in (REF_LABELS_KEY, REF_DATA_KEY):
             for item in st.session_state.get(store_key, []):
