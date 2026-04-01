@@ -1,1435 +1,638 @@
 """
 Qualtrics Dashboard Translator — Streamlit App
 ==============================================
-Polished internal government analytics tool interface.
-Minimalist, centered, dark-mode aware, modular UI.
-Backend pipeline preserved.
+Persistent file stores + glossary, simultaneous label+data translation,
+multi-file results with ZIP download.
 """
 from __future__ import annotations
 import hashlib
 import io
 import os
+import zipfile
 from typing import Optional
+
 import pandas as pd
 import streamlit as st
+
 from processor.detector import FileType
 from processor.file_loader import load_file
 from processor.pipeline import PipelineConfig, PipelineResult, run_pipeline
 from processor.reference_memory import TranslationMemory, build_memory_from_reference
 from processor.rules import Provenance
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PAGE CONFIG
-# ═══════════════════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="Qualtrics Dashboard Translator",
-    page_icon="🍁",
+    page_icon="\U0001f341",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-# ═══════════════════════════════════════════════════════════════════════════
-# CONSTANTS
-# ═══════════════════════════════════════════════════════════════════════════
-MAPLE_LEAF_SVG = """
-<svg width="28" height="28" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <path fill="#D52B1E" d="M31.9 6l4.2 10.6 7-3.6-1.8 8.2 9-1.3-5.9 7.1 8.8 2.7-8 4.5 5 8-9-2.3.8 9.2-9.2-7.6-9.2 7.6.8-9.2-9 2.3 5-8-8-4.5 8.8-2.7-5.9-7.1 9 1.3-1.8-8.2 7 3.6z"/>
-</svg>
-"""
-CURVED_ARROW_SVG = """
-<svg width="88" height="56" viewBox="0 0 88 56" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <path d="M8 10 C 28 10, 26 40, 56 40 L 70 40" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
-  <path d="M62 32 L 74 40 L 62 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-</svg>
-"""
-# ═══════════════════════════════════════════════════════════════════════════
-# CSS — All 8 UI bugs fixed
-# ═══════════════════════════════════════════════════════════════════════════
-def inject_css() -> None:
-    st.markdown(
-        """
+
+MAPLE_LEAF_SVG = """<svg width="28" height="28" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="#D52B1E" d="M31.9 6l4.2 10.6 7-3.6-1.8 8.2 9-1.3-5.9 7.1 8.8 2.7-8 4.5 5 8-9-2.3.8 9.2-9.2-7.6-9.2 7.6.8-9.2-9 2.3 5-8-8-4.5 8.8-2.7-5.9-7.1 9 1.3-1.8-8.2 7 3.6z"/></svg>"""
+CURVED_ARROW_SVG = """<svg width="88" height="56" viewBox="0 0 88 56" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 10 C 28 10, 26 40, 56 40 L 70 40" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/><path d="M62 32 L 74 40 L 62 48" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"""
+
+REF_LABELS_KEY = "ref_labels_store"
+REF_DATA_KEY   = "ref_data_store"
+TX_LABELS_KEY  = "tx_labels_store"
+TX_DATA_KEY    = "tx_data_store"
+ALL_STORES     = [REF_LABELS_KEY, REF_DATA_KEY, TX_LABELS_KEY, TX_DATA_KEY]
+GEN_KEYS       = {
+    REF_LABELS_KEY: "gen_ref_labels",
+    REF_DATA_KEY:   "gen_ref_data",
+    TX_LABELS_KEY:  "gen_tx_labels",
+    TX_DATA_KEY:    "gen_tx_data",
+}
+
+# ---------------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------------
+CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-/* ══════════════════════════════════════════════════════════
-   LIGHT MODE — default variables
-   FIX #8: More color accents in light mode
-   ══════════════════════════════════════════════════════════ */
 :root {
-    --bg: #FFFFFF;
-    --bg-soft: #F7F7F7;
-    --bg-elevated: #F0F0F0;
-    --bg-hover: #E8E8E8;
-    --text: #111111;
-    --text-sub: #333333;
-    --text-dim: #6B7280;
-    --border: #D9D9D9;
-    --border-strong: #C0C0C0;
-    /* FIX #8: accent borders for cards in light mode */
-    --border-accent: rgba(28, 61, 90, 0.18);
-    --red: #D52B1E;
-    --red-hover: #B82219;
-    --red-soft: rgba(213, 43, 30, 0.08);
-    --red-glow: rgba(213, 43, 30, 0.20);
-    --blue: #1C3D5A;
-    --blue-2: #2B5C85;
-    --blue-soft: rgba(28, 61, 90, 0.10);
-    --green: #1A7742;
-    --green-soft: rgba(26, 119, 66, 0.10);
-    --amber: #B56F00;
-    --amber-soft: rgba(181, 111, 0, 0.10);
-    --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-    --shadow-md: 0 8px 24px rgba(0,0,0,0.08);
-    --r-sm: 12px;
-    --r-md: 16px;
-    --r-lg: 24px;
-    --r-pill: 999px;
-    --transition: 150ms ease;
-    /* FIX #8: divider accent in light mode */
-    --divider-color: #D9D9D9;
+    --bg:#FFFFFF;--bg-soft:#F7F7F7;--bg-elevated:#F0F0F0;--bg-hover:#E8E8E8;
+    --text:#111111;--text-sub:#333333;--text-dim:#6B7280;
+    --border:#D9D9D9;--border-accent:rgba(28,61,90,0.18);
+    --red:#D52B1E;--red-hover:#B82219;--red-soft:rgba(213,43,30,0.08);--red-glow:rgba(213,43,30,0.20);
+    --blue:#1C3D5A;--blue-soft:rgba(28,61,90,0.10);
+    --green:#1A7742;--green-soft:rgba(26,119,66,0.10);
+    --amber:#B56F00;--amber-soft:rgba(181,111,0,0.10);
+    --shadow-sm:0 1px 3px rgba(0,0,0,0.06);--shadow-md:0 8px 24px rgba(0,0,0,0.08);
+    --transition:150ms ease;--divider-color:#D9D9D9;
 }
-
-/* ══════════════════════════════════════════════════════════
-   DARK MODE — via OS preference
-   FIX #1: All text explicitly light
-   FIX #2: Cards/buttons use dark marine blue
-   FIX #6: Background is dark grey, not pure black
-   ══════════════════════════════════════════════════════════ */
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #1A1A1A;
-        --bg-soft: #1C2E4A;
-        --bg-elevated: #223754;
-        --bg-hover: #2A4060;
-        --text: #F3F4F6;
-        --text-sub: #D1D5DB;
-        --text-dim: #9CA3AF;
-        --border: #2D4A6A;
-        --border-strong: #3B5C82;
-        --border-accent: rgba(96, 165, 250, 0.20);
-        --red: #EF4444;
-        --red-hover: #DC2626;
-        --red-soft: rgba(239, 68, 68, 0.14);
-        --red-glow: rgba(239, 68, 68, 0.28);
-        --blue: #60A5FA;
-        --blue-2: #93C5FD;
-        --blue-soft: rgba(96, 165, 250, 0.16);
-        --green: #34D399;
-        --green-soft: rgba(52, 211, 153, 0.14);
-        --amber: #FBBF24;
-        --amber-soft: rgba(251, 191, 36, 0.14);
-        --shadow-sm: 0 1px 3px rgba(0,0,0,0.40);
-        --shadow-md: 0 10px 28px rgba(0,0,0,0.45);
-        --divider-color: #2D4A6A;
-    }
-}
-
-/* ══════════════════════════════════════════════════════════
-   DARK MODE — via Streamlit internal theme
-   Duplicated to catch Streamlit's own dark mode toggle
-   ══════════════════════════════════════════════════════════ */
-.stApp[data-theme="dark"],
-[data-theme="dark"],
+@media (prefers-color-scheme:dark){:root{
+    --bg:#1A1A1A;--bg-soft:#1C2E4A;--bg-elevated:#223754;--bg-hover:#2A4060;
+    --text:#F3F4F6;--text-sub:#D1D5DB;--text-dim:#9CA3AF;
+    --border:#2D4A6A;--border-accent:rgba(96,165,250,0.20);
+    --red:#EF4444;--red-hover:#DC2626;--red-soft:rgba(239,68,68,0.14);--red-glow:rgba(239,68,68,0.28);
+    --blue:#60A5FA;--blue-soft:rgba(96,165,250,0.16);
+    --green:#34D399;--green-soft:rgba(52,211,153,0.14);
+    --amber:#FBBF24;--amber-soft:rgba(251,191,36,0.14);
+    --shadow-sm:0 1px 3px rgba(0,0,0,0.40);--shadow-md:0 10px 28px rgba(0,0,0,0.45);
+    --divider-color:#2D4A6A;
+}}
+.stApp[data-theme="dark"],[data-theme="dark"],
 [data-testid="stAppViewContainer"][style*="background-color: rgb(14"],
-[data-testid="stAppViewContainer"][style*="background-color: rgb(0"] {
-    --bg: #1A1A1A;
-    --bg-soft: #1C2E4A;
-    --bg-elevated: #223754;
-    --bg-hover: #2A4060;
-    --text: #F3F4F6;
-    --text-sub: #D1D5DB;
-    --text-dim: #9CA3AF;
-    --border: #2D4A6A;
-    --border-strong: #3B5C82;
-    --border-accent: rgba(96, 165, 250, 0.20);
-    --red: #EF4444;
-    --red-hover: #DC2626;
-    --red-soft: rgba(239, 68, 68, 0.14);
-    --red-glow: rgba(239, 68, 68, 0.28);
-    --blue: #60A5FA;
-    --blue-2: #93C5FD;
-    --blue-soft: rgba(96, 165, 250, 0.16);
-    --green: #34D399;
-    --green-soft: rgba(52, 211, 153, 0.14);
-    --amber: #FBBF24;
-    --amber-soft: rgba(251, 191, 36, 0.14);
-    --shadow-sm: 0 1px 3px rgba(0,0,0,0.40);
-    --shadow-md: 0 10px 28px rgba(0,0,0,0.45);
-    --divider-color: #2D4A6A;
+[data-testid="stAppViewContainer"][style*="background-color: rgb(0"]{
+    --bg:#1A1A1A;--bg-soft:#1C2E4A;--bg-elevated:#223754;--bg-hover:#2A4060;
+    --text:#F3F4F6;--text-sub:#D1D5DB;--text-dim:#9CA3AF;
+    --border:#2D4A6A;--border-accent:rgba(96,165,250,0.20);
+    --red:#EF4444;--red-hover:#DC2626;--red-soft:rgba(239,68,68,0.14);--red-glow:rgba(239,68,68,0.28);
+    --blue:#60A5FA;--blue-soft:rgba(96,165,250,0.16);
+    --green:#34D399;--green-soft:rgba(52,211,153,0.14);
+    --amber:#FBBF24;--amber-soft:rgba(251,191,36,0.14);
+    --shadow-sm:0 1px 3px rgba(0,0,0,0.40);--shadow-md:0 10px 28px rgba(0,0,0,0.45);
+    --divider-color:#2D4A6A;
 }
-
-/* ══════════════════════════════════════════════════════════
-   GLOBAL TYPOGRAPHY
-   ══════════════════════════════════════════════════════════ */
-html, body, .stApp, [data-testid="stAppViewContainer"],
-.stMarkdown, div, p, span, label, button, h1, h2, h3 {
-    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif !important;
-}
-.stApp {
-    color: var(--text);
-    font-size: 15px;
-    line-height: 1.5;
-}
-header[data-testid="stHeader"] {
-    background: transparent !important;
-}
-
-/* FIX #7: Hide GitHub icon / toolbar buttons */
-[data-testid="stToolbar"],
-[data-testid="stDecoration"],
-.stDeployButton,
-#MainMenu,
-header [data-testid="stToolbar"] {
-    display: none !important;
-    visibility: hidden !important;
-}
-
-/* Centered container */
-[data-testid="stMainBlockContainer"], .block-container {
-    max-width: 1100px !important;
-    padding-top: 1.2rem !important;
-    padding-left: 2rem !important;
-    padding-right: 2rem !important;
-}
-
-/* Hide default file uploader labels */
-[data-testid="stFileUploader"] > label {
-    display: none !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   HEADER
-   FIX #5: Title ~76px, split onto two lines
-   FIX #1: Title uses var(--text) for dark mode
-   FIX #8: Leaf circle has red border accent in light mode
-   ══════════════════════════════════════════════════════════ */
-.app-header {
-    text-align: center;
-    padding-top: 32px;
-}
-.app-header .leaf {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    background: var(--red-soft);
-    border: 2px solid rgba(213, 43, 30, 0.15);
-    box-shadow: var(--shadow-sm);
-    margin-bottom: 16px;
-}
-.app-header h1 {
-    margin: 0;
-    color: var(--text) !important;
-    font-size: 76px;
-    font-weight: 800;
-    line-height: 1.04;
-    letter-spacing: -0.04em;
-}
-.app-header p {
-    margin: 14px 0 32px 0;
-    color: var(--text-sub) !important;
-    font-size: 18px;
-    font-weight: 400;
-}
-/* FIX #8: Divider uses subtle red accent in light mode */
-.app-divider {
-    width: 100%;
-    max-width: 800px;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--red) 30%, var(--red) 70%, transparent);
-    opacity: 0.2;
-    border: 0;
-    margin: 0 auto;
-}
-
-/* ══════════════════════════════════════════════════════════
-   SECTIONS
-   FIX #1: All section text uses CSS vars for dark mode
-   FIX #4: Centered description text
-   ══════════════════════════════════════════════════════════ */
-.section-wrap {
-    margin-top: 56px;
-    text-align: center;
-    width: 100%;
-}
-.section-wrap h2 {
-    margin: 0 0 8px 0;
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--text) !important;
-    text-align: center;
-}
-/* FIX #4: ensure description is truly centered */
-.section-wrap p {
-    margin: 0 auto 28px auto;
-    max-width: 660px;
-    font-size: 15px;
-    color: var(--text-dim) !important;
-    text-align: center;
-    display: block;
-    width: 100%;
-}
-/* FIX #8: Section divider uses blue accent */
-.section-divider {
-    width: 100%;
-    max-width: 800px;
-    height: 1px;
-    background: var(--divider-color);
-    border: 0;
-    margin: 56px auto 0 auto;
-}
-
-/* ══════════════════════════════════════════════════════════
-   CARDS
-   FIX #2: Uses --bg-soft which becomes dark marine blue
-   ══════════════════════════════════════════════════════════ */
-.soft-card {
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    padding: 28px;
-    box-shadow: var(--shadow-sm);
-}
-
-/* ══════════════════════════════════════════════════════════
-   REFERENCE UPLOAD CARDS
-   FIX #1: All text uses CSS vars
-   FIX #2: Cards use --bg-soft (dark marine blue in dark mode)
-   FIX #8: Light mode cards have accent border
-   ══════════════════════════════════════════════════════════ */
-.ref-caption {
-    text-align: center;
-    margin-bottom: 12px;
-}
-.ref-caption .title {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--text) !important;
-    margin-bottom: 4px;
-}
-.ref-caption .drag {
-    font-size: 15px;
-    color: var(--text-sub) !important;
-    margin-bottom: 4px;
-}
-.ref-caption .detail {
-    font-size: 13px;
-    color: var(--text-dim) !important;
-    line-height: 1.4;
-}
-
-/* File uploader styled as drop zone card */
-.uploader-wrap {
-    margin-top: 8px;
-}
-.uploader-wrap [data-testid="stFileUploader"] {
-    width: 100%;
-}
-/* FIX #2: uploader section bg uses --bg-soft (marine blue in dark) */
-/* FIX #8: dashed border uses accent color in light mode */
-.uploader-wrap [data-testid="stFileUploader"] section {
-    min-height: 160px !important;
-    background: var(--bg-soft) !important;
-    border: 2px dashed var(--border-accent) !important;
-    border-radius: 16px !important;
-    padding: 18px 20px !important;
-    transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition) !important;
-}
-.uploader-wrap [data-testid="stFileUploader"] section:hover {
-    border-color: var(--blue) !important;
-    box-shadow: var(--shadow-md) !important;
-    transform: translateY(-1px);
-}
-/* FIX #1: small text inside uploader */
-.uploader-wrap [data-testid="stFileUploader"] small {
-    display: block !important;
-    text-align: center !important;
-    color: var(--text-dim) !important;
-    font-size: 12px !important;
-}
-/* FIX #1: browse button text color */
-.uploader-wrap [data-testid="stFileUploader"] button {
-    border-radius: 999px !important;
-    border: 1px solid var(--border) !important;
-    background: var(--bg-elevated) !important;
-    color: var(--text) !important;
-    font-size: 13px !important;
-    font-weight: 600 !important;
-    padding: 8px 22px !important;
-    transition: all var(--transition) !important;
-}
-.uploader-wrap [data-testid="stFileUploader"] button:hover {
-    border-color: var(--blue) !important;
-    background: var(--blue-soft) !important;
-    color: var(--blue) !important;
-}
-/* FIX #1: file uploader drag-over text */
+html,body,.stApp,[data-testid="stAppViewContainer"],.stMarkdown,div,p,span,label,button,h1,h2,h3{
+    font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif !important;}
+.stApp{color:var(--text);font-size:15px;line-height:1.5;}
+header[data-testid="stHeader"]{background:transparent !important;}
+[data-testid="stToolbar"],[data-testid="stDecoration"],.stDeployButton,#MainMenu{display:none !important;}
+[data-testid="stMainBlockContainer"],.block-container{
+    max-width:1100px !important;padding-top:1.2rem !important;
+    padding-left:2rem !important;padding-right:2rem !important;}
+[data-testid="stFileUploader"]>label{display:none !important;}
+.app-header{text-align:center;padding-top:32px;}
+.app-header .leaf{display:inline-flex;align-items:center;justify-content:center;
+    width:56px;height:56px;border-radius:50%;background:var(--red-soft);
+    border:2px solid rgba(213,43,30,0.15);box-shadow:var(--shadow-sm);margin-bottom:16px;}
+.app-header h1{margin:0;color:var(--text) !important;font-size:76px;font-weight:800;line-height:1.04;letter-spacing:-0.04em;}
+.app-header p{margin:14px 0 32px 0;color:var(--text-sub) !important;font-size:18px;}
+.app-divider{width:100%;max-width:800px;height:2px;
+    background:linear-gradient(90deg,transparent,var(--red) 30%,var(--red) 70%,transparent);
+    opacity:0.2;border:0;margin:0 auto;}
+.section-wrap{margin-top:56px;text-align:center;width:100%;}
+.section-wrap h2{margin:0 0 8px 0;font-size:24px;font-weight:600;color:var(--text) !important;}
+.section-wrap p{margin:0 auto 28px auto;max-width:660px;font-size:15px;
+    color:var(--text-dim) !important;text-align:center;display:block;width:100%;}
+.section-divider{width:100%;max-width:800px;height:1px;background:var(--divider-color);border:0;margin:56px auto 0 auto;}
+.ref-caption{text-align:center;margin-bottom:12px;}
+.ref-caption .title{font-size:20px;font-weight:600;color:var(--text) !important;margin-bottom:4px;}
+.ref-caption .drag{font-size:15px;color:var(--text-sub) !important;margin-bottom:4px;}
+.ref-caption .detail{font-size:13px;color:var(--text-dim) !important;line-height:1.4;}
+.uploader-wrap{margin-top:8px;}
+.uploader-wrap [data-testid="stFileUploader"] section{
+    min-height:140px !important;background:var(--bg-soft) !important;
+    border:2px dashed var(--border-accent) !important;border-radius:16px !important;
+    padding:18px 20px !important;transition:border-color var(--transition),box-shadow var(--transition) !important;}
+.uploader-wrap [data-testid="stFileUploader"] section:hover{
+    border-color:var(--blue) !important;box-shadow:var(--shadow-md) !important;}
+.uploader-wrap [data-testid="stFileUploader"] small{
+    display:block !important;text-align:center !important;color:var(--text-dim) !important;font-size:12px !important;}
+.uploader-wrap [data-testid="stFileUploader"] button{
+    border-radius:999px !important;border:1px solid var(--border) !important;
+    background:var(--bg-elevated) !important;color:var(--text) !important;
+    font-size:13px !important;font-weight:600 !important;padding:8px 22px !important;}
+.uploader-wrap [data-testid="stFileUploader"] button:hover{
+    border-color:var(--blue) !important;background:var(--blue-soft) !important;color:var(--blue) !important;}
 .uploader-wrap [data-testid="stFileUploader"] section div,
 .uploader-wrap [data-testid="stFileUploader"] section span,
-.uploader-wrap [data-testid="stFileUploader"] section p {
-    color: var(--text-dim) !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   STATUS PILLS
-   ══════════════════════════════════════════════════════════ */
-.status-row {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    margin-top: 24px;
-}
-.status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 9px 18px;
-    border-radius: 999px;
-    font-size: 14px;
-    font-weight: 600;
-}
-.status-pill.ok {
-    background: var(--green-soft);
-    color: var(--green);
-}
-.status-pill.warn {
-    background: var(--amber-soft);
-    color: var(--amber);
-}
-
-/* ══════════════════════════════════════════════════════════
-   MEMORY BOX
-   FIX #2: Uses --bg-soft (marine blue in dark mode)
-   FIX #1: Label text uses --text-dim
-   FIX #8: Red border accent in light mode
-   ══════════════════════════════════════════════════════════ */
-.memory-box {
-    margin: 20px auto 0 auto;
-    max-width: 220px;
-    text-align: center;
-    background: var(--bg-soft);
-    border: 1px solid var(--border-accent);
-    border-radius: 14px;
-    padding: 20px;
-    box-shadow: var(--shadow-sm);
-}
-.memory-box .value {
-    font-size: 36px;
-    font-weight: 700;
-    color: var(--red);
-    line-height: 1;
-}
-.memory-box .label {
-    margin-top: 5px;
-    font-size: 13px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-dim) !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   FILE TYPE SELECTOR BUTTONS
-   FIX #2: Secondary buttons use --bg-soft (marine blue in dark)
-   FIX #1: Button text explicitly set
-   FIX #8: Hover borders use blue accent
-   ══════════════════════════════════════════════════════════ */
-.stButton > button {
-    min-height: 58px !important;
-    border-radius: 24px !important;
-    font-size: 16px !important;
-    font-weight: 600 !important;
-    padding: 16px 34px !important;
-    transition: all var(--transition) !important;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    text-align: center !important;
-    margin: 0 auto !important;
-}
-.stButton > button[kind="primary"] {
-    background: var(--red) !important;
-    border: 0 !important;
-    color: #FFFFFF !important;
-    box-shadow: 0 4px 20px var(--red-glow) !important;
-}
-.stButton > button[kind="primary"]:hover {
-    background: var(--red-hover) !important;
-    transform: scale(1.03) !important;
-    box-shadow: 0 8px 24px var(--red-glow) !important;
-}
-/* FIX #2: Secondary uses --bg-soft for dark marine blue in dark mode */
-.stButton > button[kind="secondary"] {
-    background: var(--bg-soft) !important;
-    color: var(--text) !important;
-    border: 2px solid var(--border) !important;
-}
-.stButton > button[kind="secondary"]:hover {
-    border-color: var(--blue) !important;
-    background: var(--blue-soft) !important;
-    color: var(--blue) !important;
-    transform: scale(1.03) !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   DOWNLOAD BUTTONS
-   ══════════════════════════════════════════════════════════ */
-.stDownloadButton > button {
-    min-height: 58px !important;
-    border-radius: 24px !important;
-    font-size: 16px !important;
-    font-weight: 600 !important;
-    padding: 16px 34px !important;
-    background: var(--red) !important;
-    color: #FFFFFF !important;
-    border: 0 !important;
-    box-shadow: 0 4px 20px var(--red-glow) !important;
-    transition: all var(--transition) !important;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    text-align: center !important;
-    margin: 0 auto !important;
-}
-.stDownloadButton > button:hover {
-    background: var(--red-hover) !important;
-    transform: scale(1.03) !important;
-    box-shadow: 0 8px 24px var(--red-glow) !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   TRANSLATE PANEL
-   FIX #1: hint text uses CSS vars
-   ══════════════════════════════════════════════════════════ */
-.panel-card {
-    max-width: 720px;
-    margin: 0 auto;
-}
-.panel-hint {
-    text-align: center;
-    font-size: 15px;
-    color: var(--text-dim) !important;
-    margin-bottom: 18px;
-}
-.panel-hint strong {
-    color: var(--text) !important;
-}
-.panel-hint code {
-    background: var(--blue-soft);
-    color: var(--blue);
-    padding: 2px 8px;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-}
-
-/* ══════════════════════════════════════════════════════════
-   FILE RESULT CARD — per-file result in multi-file mode
-   ══════════════════════════════════════════════════════════ */
-.file-result-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 28px 0 8px 0;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--border);
-}
-.file-result-header .file-index {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: var(--red-soft);
-    color: var(--red);
-    font-size: 13px;
-    font-weight: 700;
-    flex-shrink: 0;
-}
-.file-result-header .file-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text) !important;
-    word-break: break-all;
-}
-
-/* ══════════════════════════════════════════════════════════
-   STATS ROW
-   FIX #1: value/label text uses vars
-   FIX #8: accent border in light mode
-   ══════════════════════════════════════════════════════════ */
-.stats-row {
-    display: flex;
-    justify-content: center;
-    gap: 14px;
-    flex-wrap: wrap;
-    margin: 22px auto 0 auto;
-    max-width: 560px;
-}
-.stat-card {
-    flex: 1;
-    min-width: 150px;
-    background: var(--bg-soft);
-    border: 1px solid var(--border-accent);
-    border-radius: 14px;
-    padding: 18px 14px;
-    text-align: center;
-}
-.stat-card .value {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text) !important;
-    line-height: 1;
-}
-.stat-card .label {
-    margin-top: 5px;
-    font-size: 12px;
-    color: var(--text-dim) !important;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 500;
-}
-
-/* ══════════════════════════════════════════════════════════
-   PROCESSING CARD
-   FIX #1: text colors
-   ══════════════════════════════════════════════════════════ */
-.processing-card {
-    max-width: 720px;
-    margin: 24px auto 0 auto;
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 24px 24px 18px 24px;
-    text-align: center;
-}
-.processing-card .title {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--text) !important;
-    margin-bottom: 4px;
-}
-.processing-card .sub {
-    font-size: 14px;
-    color: var(--text-dim) !important;
-    margin-bottom: 18px;
-}
-
-/* ══════════════════════════════════════════════════════════
-   PROVENANCE METRICS
-   FIX #1: text colors
-   FIX #8: accent border
-   ══════════════════════════════════════════════════════════ */
-.prov-row {
-    display: flex;
-    justify-content: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin: 24px auto;
-    max-width: 700px;
-}
-.prov-card {
-    flex: 1;
-    min-width: 125px;
-    background: var(--bg-soft);
-    border: 1px solid var(--border-accent);
-    border-radius: 14px;
-    padding: 16px 12px;
-    text-align: center;
-}
-.prov-card .value {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text) !important;
-}
-.prov-card .label {
-    margin-top: 4px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim) !important;
-    font-weight: 500;
-}
-
-/* ══════════════════════════════════════════════════════════
-   DOWNLOAD / DONE AREA
-   FIX #1: text colors
-   FIX #3: arrow icon uses SVG (already correct)
-   ══════════════════════════════════════════════════════════ */
-.done-area {
-    text-align: center;
-    margin: 34px auto 0 auto;
-    max-width: 620px;
-}
-.done-area .done-arrow {
-    color: var(--red);
-    display: inline-flex;
-    margin-bottom: 6px;
-    animation: floatArrow 1.5s ease-in-out infinite;
-}
-@keyframes floatArrow {
-    0%,100% { transform: translateY(0px); }
-    50% { transform: translateY(-6px); }
-}
-.done-area h3 {
-    margin: 0 0 6px 0;
-    color: var(--text) !important;
-    font-size: 22px;
-    font-weight: 700;
-}
-.done-area p {
-    margin: 0 0 20px 0;
-    color: var(--text-dim) !important;
-    font-size: 15px;
-}
-.secondary-downloads {
-    max-width: 420px;
-    margin: 18px auto 0 auto;
-}
-
-/* ══════════════════════════════════════════════════════════
-   PROGRESS BAR
-   ══════════════════════════════════════════════════════════ */
-.stProgress > div > div > div > div {
-    background: var(--red) !important;
-    border-radius: 999px !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   ALERTS + EXPANDERS
-   ══════════════════════════════════════════════════════════ */
-.stSuccess, .stError, .stWarning, .stInfo {
-    border-radius: 14px !important;
-}
-details {
-    border-radius: 14px !important;
-}
-.streamlit-expanderHeader {
-    font-size: 15px !important;
-    font-weight: 600 !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   FOOTER
-   FIX #1: text color
-   FIX #8: red dot accent
-   ══════════════════════════════════════════════════════════ */
-.app-footer {
-    text-align: center;
-    font-size: 13px;
-    color: var(--text-dim) !important;
-    padding: 56px 0 24px 0;
-}
-
-/* ══════════════════════════════════════════════════════════
-   SIDEBAR
-   FIX #1: sidebar text colors
-   ══════════════════════════════════════════════════════════ */
-section[data-testid="stSidebar"] {
-    background: var(--bg-soft) !important;
-}
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3,
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] span,
-section[data-testid="stSidebar"] p {
-    color: var(--text) !important;
-}
-
-/* ══════════════════════════════════════════════════════════
-   DARK MODE EXPLICIT OVERRIDES
-   Final safety net: force light text on all custom elements
-   when Streamlit applies dark background
-   ══════════════════════════════════════════════════════════ */
-@media (prefers-color-scheme: dark) {
-    .app-header h1,
-    .section-wrap h2,
-    .ref-caption .title,
-    .stat-card .value,
-    .prov-card .value,
-    .processing-card .title,
-    .done-area h3,
-    .memory-box .label,
-    .panel-hint strong,
-    .file-result-header .file-name {
-        color: #F3F4F6 !important;
-    }
-    .app-header p,
-    .ref-caption .drag,
-    .section-wrap p,
-    .ref-caption .detail,
-    .stat-card .label,
-    .prov-card .label,
-    .processing-card .sub,
-    .done-area p,
-    .panel-hint,
-    .app-footer {
-        color: #9CA3AF !important;
-    }
-    /* FIX #6: Force Streamlit's own background to dark grey */
-    .stApp,
-    [data-testid="stAppViewContainer"] {
-        background-color: #1A1A1A !important;
-    }
+.uploader-wrap [data-testid="stFileUploader"] section p{color:var(--text-dim) !important;}
+.stored-file-row{display:flex;align-items:center;gap:8px;padding:5px 10px;
+    border-radius:8px;background:var(--bg-soft);border:1px solid var(--border);margin-bottom:5px;}
+.stored-file-row .sf-name{flex:1;font-size:13px;color:var(--text-sub) !important;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.remove-btn>div>button,.remove-btn button{
+    min-height:26px !important;height:26px !important;padding:0 8px !important;
+    font-size:12px !important;border-radius:6px !important;margin:0 !important;
+    background:transparent !important;border:1px solid var(--border) !important;
+    color:var(--text-dim) !important;line-height:1 !important;box-shadow:none !important;transform:none !important;}
+.remove-btn>div>button:hover,.remove-btn button:hover{
+    border-color:var(--red) !important;color:var(--red) !important;
+    background:var(--red-soft) !important;transform:none !important;}
+.status-row{display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;margin-top:24px;}
+.status-pill{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;border-radius:999px;font-size:14px;font-weight:600;}
+.status-pill.ok{background:var(--green-soft);color:var(--green);}
+.status-pill.warn{background:var(--amber-soft);color:var(--amber);}
+.memory-box{margin:20px auto 0 auto;max-width:220px;text-align:center;background:var(--bg-soft);
+    border:1px solid var(--border-accent);border-radius:14px;padding:20px;box-shadow:var(--shadow-sm);}
+.memory-box .value{font-size:36px;font-weight:700;color:var(--red);line-height:1;}
+.memory-box .label{margin-top:5px;font-size:13px;font-weight:500;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-dim) !important;}
+.glossary-card{background:var(--bg-soft);border:1px solid var(--border-accent);
+    border-radius:16px;padding:24px 28px;margin-top:24px;}
+.glossary-note{font-size:13px;color:var(--text-dim) !important;margin-top:10px;text-align:center;}
+.stButton>button{min-height:58px !important;border-radius:24px !important;font-size:16px !important;
+    font-weight:600 !important;padding:16px 34px !important;transition:all var(--transition) !important;
+    display:flex !important;justify-content:center !important;align-items:center !important;margin:0 auto !important;}
+.stButton>button[kind="primary"]{background:var(--red) !important;border:0 !important;
+    color:#FFFFFF !important;box-shadow:0 4px 20px var(--red-glow) !important;}
+.stButton>button[kind="primary"]:hover{background:var(--red-hover) !important;
+    transform:scale(1.03) !important;box-shadow:0 8px 24px var(--red-glow) !important;}
+.stButton>button[kind="secondary"]{background:var(--bg-soft) !important;
+    color:var(--text) !important;border:2px solid var(--border) !important;}
+.stButton>button[kind="secondary"]:hover{border-color:var(--blue) !important;
+    background:var(--blue-soft) !important;color:var(--blue) !important;transform:scale(1.03) !important;}
+.stDownloadButton>button{min-height:58px !important;border-radius:24px !important;font-size:16px !important;
+    font-weight:600 !important;padding:16px 34px !important;background:var(--red) !important;
+    color:#FFFFFF !important;border:0 !important;box-shadow:0 4px 20px var(--red-glow) !important;
+    transition:all var(--transition) !important;display:flex !important;
+    justify-content:center !important;align-items:center !important;margin:0 auto !important;}
+.stDownloadButton>button:hover{background:var(--red-hover) !important;
+    transform:scale(1.03) !important;box-shadow:0 8px 24px var(--red-glow) !important;}
+.stat-card{flex:1;min-width:140px;background:var(--bg-soft);border:1px solid var(--border-accent);
+    border-radius:14px;padding:18px 14px;text-align:center;}
+.stats-row{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin:22px auto 0 auto;max-width:560px;}
+.stat-card .value{font-size:22px;font-weight:700;color:var(--text) !important;line-height:1;}
+.stat-card .label{margin-top:5px;font-size:12px;color:var(--text-dim) !important;
+    text-transform:uppercase;letter-spacing:0.05em;font-weight:500;}
+.file-result-header{display:flex;align-items:center;gap:10px;margin:32px 0 10px 0;
+    padding-bottom:10px;border-bottom:1px solid var(--border);}
+.file-result-header .idx{display:inline-flex;align-items:center;justify-content:center;
+    width:26px;height:26px;border-radius:50%;background:var(--red-soft);color:var(--red);
+    font-size:12px;font-weight:700;flex-shrink:0;}
+.file-result-header .fname{font-size:15px;font-weight:600;color:var(--text) !important;word-break:break-all;}
+.file-result-header .ftype{font-size:12px;font-weight:500;color:var(--text-dim) !important;
+    background:var(--bg-elevated);border-radius:6px;padding:2px 8px;flex-shrink:0;}
+.processing-card{max-width:720px;margin:24px auto 0 auto;background:var(--bg-soft);
+    border:1px solid var(--border);border-radius:16px;padding:24px 24px 18px 24px;text-align:center;}
+.processing-card .title{font-size:20px;font-weight:600;color:var(--text) !important;margin-bottom:4px;}
+.processing-card .sub{font-size:14px;color:var(--text-dim) !important;margin-bottom:18px;}
+.prov-row{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin:24px auto;max-width:700px;}
+.prov-card{flex:1;min-width:125px;background:var(--bg-soft);border:1px solid var(--border-accent);
+    border-radius:14px;padding:16px 12px;text-align:center;}
+.prov-card .value{font-size:22px;font-weight:700;color:var(--text) !important;}
+.prov-card .label{margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;
+    color:var(--text-dim) !important;font-weight:500;}
+.done-area{text-align:center;margin:34px auto 0 auto;max-width:620px;}
+.done-area .done-arrow{color:var(--red);display:inline-flex;margin-bottom:6px;
+    animation:floatArrow 1.5s ease-in-out infinite;}
+@keyframes floatArrow{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}
+.done-area h3{margin:0 0 6px 0;color:var(--text) !important;font-size:22px;font-weight:700;}
+.done-area p{margin:0 0 20px 0;color:var(--text-dim) !important;font-size:15px;}
+.secondary-downloads{max-width:420px;margin:18px auto 0 auto;}
+.stProgress>div>div>div>div{background:var(--red) !important;border-radius:999px !important;}
+.stSuccess,.stError,.stWarning,.stInfo{border-radius:14px !important;}
+details{border-radius:14px !important;}
+.streamlit-expanderHeader{font-size:15px !important;font-weight:600 !important;}
+.app-footer{text-align:center;font-size:13px;color:var(--text-dim) !important;padding:56px 0 24px 0;}
+section[data-testid="stSidebar"]{background:var(--bg-soft) !important;}
+section[data-testid="stSidebar"] h1,section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3,section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] span,section[data-testid="stSidebar"] p{color:var(--text) !important;}
+@media (prefers-color-scheme:dark){
+    .app-header h1,.section-wrap h2,.ref-caption .title,.stat-card .value,
+    .prov-card .value,.processing-card .title,.done-area h3,.file-result-header .fname{color:#F3F4F6 !important;}
+    .app-header p,.ref-caption .drag,.section-wrap p,.ref-caption .detail,
+    .stat-card .label,.prov-card .label,.processing-card .sub,
+    .done-area p,.app-footer,.stored-file-row .sf-name{color:#9CA3AF !important;}
+    .stApp,[data-testid="stAppViewContainer"]{background-color:#1A1A1A !important;}
 }
 </style>
-""",
-        unsafe_allow_html=True,
-    )
+"""
 
+# ---------------------------------------------------------------------------
+# FILE STORE HELPERS
+# ---------------------------------------------------------------------------
+def _sig(name: str, data: bytes) -> str:
+    return hashlib.sha256(name.encode() + data).hexdigest()[:12]
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-def file_signature(uploaded_file) -> Optional[str]:
-    """Create a stable signature for an uploaded file."""
-    if uploaded_file is None:
-        return None
-    data = uploaded_file.getvalue()
-    return hashlib.sha256(uploaded_file.name.encode("utf-8") + b"::" + data).hexdigest()
+def init_stores() -> None:
+    for key in ALL_STORES:
+        if key not in st.session_state:
+            st.session_state[key] = []
+    for gk in GEN_KEYS.values():
+        if gk not in st.session_state:
+            st.session_state[gk] = 0
+    if "glossary" not in st.session_state:
+        st.session_state["glossary"] = [{"EN": "", "FR-CA": "", "Note": ""}]
 
-
-def files_signature(uploaded_files: list) -> str:
-    """Create a combined signature for a list of uploaded files."""
+def sync_to_store(store_key: str, uploaded_files) -> bool:
     if not uploaded_files:
-        return "none"
-    parts = [file_signature(f) for f in uploaded_files]
-    return "|".join(p for p in parts if p)
+        return False
+    store = st.session_state[store_key]
+    existing = {f["sig"] for f in store}
+    added = False
+    for uf in uploaded_files:
+        data = uf.getvalue()
+        sig = _sig(uf.name, data)
+        if sig not in existing:
+            store.append({"name": uf.name, "data": data, "sig": sig})
+            existing.add(sig)
+            added = True
+    if added:
+        st.session_state[store_key] = store
+        st.session_state[GEN_KEYS[store_key]] += 1
+    return added
 
+def remove_file(store_key: str, sig: str) -> None:
+    st.session_state[store_key] = [f for f in st.session_state[store_key] if f["sig"] != sig]
+    st.session_state.pop(f"result_{sig}", None)
+    if store_key in (REF_LABELS_KEY, REF_DATA_KEY):
+        st.session_state.pop("memory_sig", None)
 
-def rebuild_reference_memory(
-    ref_labels_files: list,
-    ref_data_files: list,
-) -> TranslationMemory:
-    """
-    Always rebuild memory from the current uploaded reference files.
-    Accepts lists of files — all files in each list are loaded.
-    """
-    memory = TranslationMemory()
-    for f in (ref_labels_files or []):
-        if f is None:
-            continue
-        try:
-            label_df = load_file(io.BytesIO(f.getvalue()), file_name=f.name)
-            build_memory_from_reference(label_df, memory, "EN", "FR-CA")
-            build_memory_from_reference(label_df, memory, "EN", "FR")
-        except Exception:
-            pass
-    for f in (ref_data_files or []):
-        if f is None:
-            continue
-        try:
-            data_df = load_file(io.BytesIO(f.getvalue()), file_name=f.name)
-            build_memory_from_reference(data_df, memory, "EN", "FR-CA")
-            build_memory_from_reference(data_df, memory, "EN", "FR")
-        except Exception:
-            pass
-    return memory
+def _glossary_sig() -> str:
+    rows = st.session_state.get("glossary", [])
+    key = "|".join(f"{r.get("EN","")}:{r.get("FR-CA","")}" for r in rows if r.get("EN","").strip())
+    return hashlib.md5(key.encode()).hexdigest()[:8]
 
+def _memory_sig() -> str:
+    parts = [f["sig"] for f in st.session_state.get(REF_LABELS_KEY, [])]
+    parts += [f["sig"] for f in st.session_state.get(REF_DATA_KEY, [])]
+    parts.append(_glossary_sig())
+    return "|".join(sorted(parts)) or "empty"
 
-def reset_result_for(panel_key: str) -> None:
-    for key in list(st.session_state.keys()):
-        if key.startswith(f"result_{panel_key}_"):
-            del st.session_state[key]
+def get_or_build_memory() -> TranslationMemory:
+    sig = _memory_sig()
+    if st.session_state.get("memory_sig") != sig:
+        memory = TranslationMemory()
+        # 1. Glossary entries first (highest priority — injected as exact matches)
+        rows = st.session_state.get("glossary", [])
+        valid_rows = [r for r in rows if r.get("EN","").strip() and r.get("FR-CA","").strip()]
+        if valid_rows:
+            gloss_df = pd.DataFrame(valid_rows)[["EN","FR-CA"]].rename(columns={"FR-CA":"FR-CA"})
+            try:
+                build_memory_from_reference(gloss_df, memory, "EN", "FR-CA")
+                # also load as FR so FR column is populated
+                gloss_fr_df = gloss_df.rename(columns={"FR-CA":"FR"})
+                gloss_fr_df["EN"] = gloss_df["EN"]
+                build_memory_from_reference(gloss_fr_df, memory, "EN", "FR")
+            except Exception:
+                pass
+        # 2. Reference files
+        for store_key in (REF_LABELS_KEY, REF_DATA_KEY):
+            for item in st.session_state.get(store_key, []):
+                try:
+                    df = load_file(io.BytesIO(item["data"]), file_name=item["name"])
+                    build_memory_from_reference(df, memory, "EN", "FR-CA")
+                    build_memory_from_reference(df, memory, "EN", "FR")
+                except Exception:
+                    pass
+        st.session_state["memory"] = memory
+        st.session_state["memory_sig"] = sig
+    return st.session_state["memory"]
 
+# ---------------------------------------------------------------------------
+# RENDER HELPERS
+# ---------------------------------------------------------------------------
+def render_stored_files(store_key: str) -> None:
+    store = st.session_state.get(store_key, [])
+    if not store:
+        return
+    for item in list(store):
+        col_name, col_btn = st.columns([14, 1])
+        with col_name:
+            st.markdown(
+                f'<div class="stored-file-row">'                f'<span style="font-size:13px;flex-shrink:0">\U0001f4c4</span>'                f'<span class="sf-name">{item["name"]}</span></div>',
+                unsafe_allow_html=True,
+            )
+        with col_btn:
+            st.markdown('<div class="remove-btn">', unsafe_allow_html=True)
+            if st.button("\u2715", key=f"rm_{item['sig']}", help=f"Remove {item['name']}"):
+                remove_file(store_key, item["sig"])
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════════════════
+def _uploader(label: str, store_key: str, caption_html: str):
+    st.markdown(caption_html, unsafe_allow_html=True)
+    st.markdown('<div class="uploader-wrap">', unsafe_allow_html=True)
+    files = st.file_uploader(
+        label, type=["csv","xlsx"],
+        key=f"ul_{store_key}_{st.session_state[GEN_KEYS[store_key]]}",
+        label_visibility="collapsed",
+        accept_multiple_files=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    return files or []
+
+# ---------------------------------------------------------------------------
 # RENDERERS
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ---------------------------------------------------------------------------
 def render_header() -> None:
-    """FIX #5: Title is ~76px, split onto two lines with <br>."""
-    st.markdown(
-        f"""
+    st.markdown(f'''
 <div class="app-header">
     <div class="leaf">{MAPLE_LEAF_SVG}</div>
     <h1>Qualtrics Dashboard<br>Translator</h1>
     <p>Translate Qualtrics Data and Label files between English and French (Canada)</p>
     <div class="app-divider"></div>
 </div>
-""",
-        unsafe_allow_html=True,
-    )
-
+''', unsafe_allow_html=True)
 
 def render_sidebar() -> tuple[bool, str, str]:
     with st.sidebar:
         st.markdown("### Advanced Settings")
-        encoding_choice = st.selectbox(
-            "Export Encoding",
-            options=["UTF-8 with BOM (recommended)", "UTF-8"],
-            index=0,
-        )
+        encoding_choice = st.selectbox("Export Encoding",
+            options=["UTF-8 with BOM (recommended)","UTF-8"], index=0)
         use_bom = "BOM" in encoding_choice
         st.divider()
-        provider_choice = st.selectbox(
-            "Translation Engine",
-            options=[
-                "Argos Translate — Offline (Recommended)",
-                "Anthropic API (requires key)",
-                "Mock (for testing)",
-            ],
-            index=0,
-        )
-        if "Argos" in provider_choice:
-            provider = "argos"
-        elif "Anthropic" in provider_choice:
-            provider = "anthropic"
-        else:
-            provider = "mock"
+        provider_choice = st.selectbox("Translation Engine", options=[
+            "Argos Translate \u2014 Offline (Recommended)",
+            "Anthropic API (requires key)", "Mock (for testing)"], index=0)
+        provider = ("argos" if "Argos" in provider_choice
+                    else "anthropic" if "Anthropic" in provider_choice else "mock")
         api_key = ""
         if provider == "anthropic":
-            api_key = st.text_input(
-                "Anthropic API Key",
-                type="password",
-                value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            )
+            api_key = st.text_input("Anthropic API Key", type="password",
+                                    value=os.environ.get("ANTHROPIC_API_KEY",""))
         st.divider()
         st.caption("Token protection and HTML preservation are always enabled.")
     return use_bom, provider, api_key
 
-
-def render_reference_upload() -> TranslationMemory:
-    st.markdown(
-        """
+def render_reference_upload() -> None:
+    st.markdown('''
 <div class="section-wrap">
     <h2>Upload Your Reference Files</h2>
-    <p>
-        Reference files allow the system to reuse existing translations
-        before generating new ones. You can upload multiple files in each slot.
-    </p>
+    <p>Reference files seed the translation memory. Files stay loaded until you remove them.</p>
 </div>
-""",
-        unsafe_allow_html=True,
-    )
+''', unsafe_allow_html=True)
     col_left, col_right = st.columns(2, gap="large")
     with col_left:
-        st.markdown(
-            """
+        new_lbl = _uploader("Reference label files", REF_LABELS_KEY, '''
 <div class="ref-caption">
     <div class="title">Reference Label Files</div>
     <div class="drag">Drag and drop files here</div>
-    <div class="detail">
-        Previously translated Qualtrics label files with EN / FR / FR-CA locale values
-    </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="uploader-wrap">', unsafe_allow_html=True)
-        ref_labels_files = st.file_uploader(
-            "Reference Label Files",
-            type=["csv", "xlsx"],
-            key="ref_labels_files",
-            label_visibility="collapsed",
-            help="Optional translation memory source for label files.",
-            accept_multiple_files=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+    <div class="detail">Previously translated label files (EN / FR / FR-CA)</div>
+</div>''')
+        render_stored_files(REF_LABELS_KEY)
     with col_right:
-        st.markdown(
-            """
+        new_dat = _uploader("Reference data files", REF_DATA_KEY, '''
 <div class="ref-caption">
     <div class="title">Reference Data Files</div>
     <div class="drag">Drag and drop files here</div>
-    <div class="detail">
-        Previously translated Qualtrics data files using the default value column as source
-    </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="uploader-wrap">', unsafe_allow_html=True)
-        ref_data_files = st.file_uploader(
-            "Reference Data Files",
-            type=["csv", "xlsx"],
-            key="ref_data_files",
-            label_visibility="collapsed",
-            help="Optional translation memory source for data files.",
-            accept_multiple_files=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    label_sig = files_signature(ref_labels_files or [])
-    data_sig = files_signature(ref_data_files or [])
-    combined_sig = f"{label_sig}|{data_sig}"
-    if st.session_state.get("reference_memory_signature") != combined_sig:
-        try:
-            st.session_state["memory"] = rebuild_reference_memory(
-                ref_labels_files or [], ref_data_files or []
-            )
-            st.session_state["reference_memory_signature"] = combined_sig
-        except Exception as exc:
-            st.error(f"Error building reference memory: {exc}")
-            st.session_state["memory"] = TranslationMemory()
-
-    memory: TranslationMemory = st.session_state.get("memory", TranslationMemory())
-    labels_count = len(ref_labels_files) if ref_labels_files else 0
-    data_count = len(ref_data_files) if ref_data_files else 0
+    <div class="detail">Previously translated data files (default value / FR / FR-CA)</div>
+</div>''')
+        render_stored_files(REF_DATA_KEY)
+    added = sync_to_store(REF_LABELS_KEY, new_lbl)
+    added |= sync_to_store(REF_DATA_KEY, new_dat)
+    if added:
+        st.rerun()
+    n_lbl = len(st.session_state.get(REF_LABELS_KEY, []))
+    n_dat = len(st.session_state.get(REF_DATA_KEY, []))
+    memory = get_or_build_memory()
     total_entries = memory.data_file_entries + memory.label_file_entries
-
-    lbl_text = f"{labels_count} file{'s' if labels_count != 1 else ''} loaded" if labels_count else "not loaded"
-    dat_text = f"{data_count} file{'s' if data_count != 1 else ''} loaded" if data_count else "not loaded"
-
-    status_html = f"""
+    lbl_text = f"{n_lbl} file{'s' if n_lbl!=1 else ''} loaded" if n_lbl else "not loaded"
+    dat_text = f"{n_dat} file{'s' if n_dat!=1 else ''} loaded" if n_dat else "not loaded"
+    st.markdown(f'''
 <div class="status-row">
-    <span class="status-pill {'ok' if labels_count else 'warn'}">
-        {'&#10003;' if labels_count else '&#9675;'} Label references {lbl_text}
-    </span>
-    <span class="status-pill {'ok' if data_count else 'warn'}">
-        {'&#10003;' if data_count else '&#9675;'} Data references {dat_text}
-    </span>
+    <span class="status-pill {'ok' if n_lbl else 'warn'}">{'&#10003;' if n_lbl else '&#9675;'} Labels \u2014 {lbl_text}</span>
+    <span class="status-pill {'ok' if n_dat else 'warn'}">{'&#10003;' if n_dat else '&#9675;'} Data \u2014 {dat_text}</span>
 </div>
-<div class="memory-box">
-    <div class="value">{total_entries:,}</div>
-    <div class="label">Memory Entries</div>
-</div>
-"""
-    st.markdown(status_html, unsafe_allow_html=True)
-    return memory
+<div class="memory-box"><div class="value">{total_entries:,}</div><div class="label">Memory Entries</div></div>
+''', unsafe_allow_html=True)
 
-
-def render_file_selection(use_bom: bool, provider: str, api_key: str) -> None:
+def render_glossary() -> None:
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    st.markdown(
-        """
+    st.markdown('''
 <div class="section-wrap">
-    <h2>Select the File You Want to Translate</h2>
+    <h2>Glossary</h2>
     <p>
-        Choose whether you are translating a Qualtrics Label File or a Qualtrics Data File.
-        You can upload multiple files to translate them all at once.
+        Define exact term mappings that will always be respected during translation.
+        Perfect for acronyms, program names, and fixed phrases.
     </p>
 </div>
-""",
-        unsafe_allow_html=True,
+''', unsafe_allow_html=True)
+
+    current = st.session_state.get("glossary", [{"EN":"","FR-CA":"","Note":""}])
+    df_gloss = pd.DataFrame(current) if current else pd.DataFrame(columns=["EN","FR-CA","Note"])
+
+    edited = st.data_editor(
+        df_gloss,
+        column_config={
+            "EN":    st.column_config.TextColumn("English (source)", width="medium"),
+            "FR-CA": st.column_config.TextColumn("French (FR-CA translation)", width="medium"),
+            "Note":  st.column_config.TextColumn("Note / context (optional)", width="medium"),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key="glossary_editor",
     )
 
-    if "active_panel" not in st.session_state:
-        st.session_state["active_panel"] = "label"
+    # Persist edits and rebuild memory if changed
+    new_rows = edited.to_dict("records")
+    old_sig = _glossary_sig()
+    st.session_state["glossary"] = new_rows
+    if _glossary_sig() != old_sig:
+        st.session_state.pop("memory_sig", None)
 
-    selector_col_left, selector_col_mid, selector_col_right = st.columns([1, 2, 1])
-    with selector_col_mid:
-        left_btn_col, right_btn_col = st.columns(2, gap="medium")
-        with left_btn_col:
-            if st.button(
-                "Label File",
-                key="select_label_file",
-                type="primary" if st.session_state["active_panel"] == "label" else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state["active_panel"] = "label"
-                reset_result_for("label")
-                st.rerun()
-        with right_btn_col:
-            if st.button(
-                "Data File",
-                key="select_data_file",
-                type="primary" if st.session_state["active_panel"] == "data" else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state["active_panel"] = "data"
-                reset_result_for("data")
-                st.rerun()
+    valid_count = sum(1 for r in new_rows if r.get("EN","").strip() and r.get("FR-CA","").strip())
+    st.markdown(f'<p class="glossary-note">&#10003; {valid_count} active term{'s' if valid_count!=1 else ''} in glossary — applied with highest priority during translation</p>',
+                unsafe_allow_html=True)
 
-    active = st.session_state["active_panel"]
-    if active == "label":
-        _render_translate_panel(
-            panel_key="label",
-            file_type=FileType.LABEL_FILE,
-            source_col_override=None,
-            source_display="EN",
-            hint_html=(
-                'Source from <code>EN</code> column &#10132; translated into '
-                '<strong>FR</strong> and <strong>FR-CA</strong>'
-            ),
-            use_bom=use_bom,
-            provider=provider,
-            api_key=api_key,
-        )
-    elif active == "data":
-        _render_translate_panel(
-            panel_key="data",
-            file_type=FileType.DATA_FILE,
-            source_col_override="default value",
-            source_display="default value",
-            hint_html=(
-                'Source from <code>default value</code> column &#10132; translated into '
-                '<strong>FR</strong> and <strong>FR-CA</strong>'
-            ),
-            use_bom=use_bom,
-            provider=provider,
-            api_key=api_key,
-        )
-
-
-def _render_translate_panel(
-    panel_key: str,
-    file_type: FileType,
-    source_col_override: Optional[str],
-    source_display: str,
-    hint_html: str,
-    use_bom: bool,
-    provider: str,
-    api_key: str,
-) -> None:
+def render_translate_section(use_bom: bool, provider: str, api_key: str) -> None:
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-<div class="panel-card">
-    <p class="panel-hint">{hint_html}</p>
+    st.markdown('''
+<div class="section-wrap">
+    <h2>Files to Translate</h2>
+    <p>Upload label files and/or data files \u2014 both types translate together with one click. Files stay loaded until you remove them.</p>
 </div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.markdown('<div class="panel-card"><div class="uploader-wrap">', unsafe_allow_html=True)
-    uploaded_files = st.file_uploader(
-        f"Upload {panel_key} files to translate",
-        type=["csv", "xlsx"],
-        key=f"{panel_key}_main_files",
-        label_visibility="collapsed",
-        help=f"Upload one or more {panel_key} files you want translated.",
-        accept_multiple_files=True,
-    )
-    st.markdown("</div></div>", unsafe_allow_html=True)
+''', unsafe_allow_html=True)
+    col_left, col_right = st.columns(2, gap="large")
+    with col_left:
+        new_lbl = _uploader("Label files to translate", TX_LABELS_KEY, '''
+<div class="ref-caption">
+    <div class="title">Label Files</div>
+    <div class="drag">Drag and drop files here</div>
+    <div class="detail"><code style="background:var(--blue-soft);color:var(--blue);padding:1px 6px;border-radius:5px;font-weight:600;font-size:12px;">EN</code> column &#10132; <strong>FR</strong> + <strong>FR-CA</strong></div>
+</div>''')
+        render_stored_files(TX_LABELS_KEY)
+    with col_right:
+        new_dat = _uploader("Data files to translate", TX_DATA_KEY, '''
+<div class="ref-caption">
+    <div class="title">Data Files</div>
+    <div class="drag">Drag and drop files here</div>
+    <div class="detail"><code style="background:var(--blue-soft);color:var(--blue);padding:1px 6px;border-radius:5px;font-weight:600;font-size:12px;">default value</code> column &#10132; <strong>FR</strong> + <strong>FR-CA</strong></div>
+</div>''')
+        render_stored_files(TX_DATA_KEY)
+    added = sync_to_store(TX_LABELS_KEY, new_lbl)
+    added |= sync_to_store(TX_DATA_KEY, new_dat)
+    if added:
+        st.rerun()
 
-    if not uploaded_files:
+    label_files = st.session_state.get(TX_LABELS_KEY, [])
+    data_files  = st.session_state.get(TX_DATA_KEY, [])
+    total = len(label_files) + len(data_files)
+    if total == 0:
         return
 
-    # ── Preview summary for all uploaded files ──────────────────────
-    total_rows = 0
-    valid_files = []
-    for uf in uploaded_files:
-        try:
-            df = load_file(io.BytesIO(uf.getvalue()), file_name=uf.name)
-            total_rows += len(df)
-            valid_files.append((uf, df))
-        except Exception as exc:
-            st.error(f"Error loading **{uf.name}**: {exc}")
-
-    if not valid_files:
-        return
-
-    # Show aggregate stats
-    all_cols = list(valid_files[0][1].columns)
-    target_cols = [c for c in all_cols if c.strip().upper() in ("FR", "FR-CA")]
-    st.markdown(
-        f"""
-<div class="stats-row">
-    <div class="stat-card">
-        <div class="value">{len(valid_files)}</div>
-        <div class="label">Files</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{total_rows:,}</div>
-        <div class="label">Total Rows</div>
-    </div>
-    <div class="stat-card">
-        <div class="value">{source_display}</div>
-        <div class="label">Source</div>
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    if len(valid_files) == 1:
-        uf, df = valid_files[0]
-        with st.expander("Preview first 8 rows"):
-            st.dataframe(df.head(8), use_container_width=True, hide_index=True)
-    else:
-        with st.expander(f"Preview files ({len(valid_files)} uploaded)"):
-            for i, (uf, df) in enumerate(valid_files, 1):
-                st.markdown(f"**{i}. {uf.name}** — {len(df):,} rows")
-                st.dataframe(df.head(4), use_container_width=True, hide_index=True)
-
-    render_translation_controls(
-        valid_files=valid_files,
-        file_type=file_type,
-        source_col_override=source_col_override,
-        target_cols=target_cols,
-        panel_key=panel_key,
-        use_bom=use_bom,
-        provider=provider,
-        api_key=api_key,
-    )
-
-
-def render_translation_controls(
-    valid_files: list,
-    file_type: FileType,
-    source_col_override: Optional[str],
-    target_cols: list[str],
-    panel_key: str,
-    use_bom: bool,
-    provider: str,
-    api_key: str,
-) -> None:
-    st.markdown(
-        """
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown(f'''
 <div class="section-wrap" style="margin-top:32px;">
     <h2>Run Translation</h2>
+    <p>{total} file{'s' if total!=1 else ''} queued \u2014 {len(label_files)} label, {len(data_files)} data</p>
 </div>
-""",
-        unsafe_allow_html=True,
-    )
+''', unsafe_allow_html=True)
 
-    n = len(valid_files)
-    btn_label = f"Translate {n} File{'s' if n != 1 else ''}"
-    translate_clicked = st.button(
-        btn_label,
-        key=f"translate_button_{panel_key}",
-        type="primary",
-        use_container_width=True,
-    )
+    if st.button(f"Translate All {total} File{'s' if total!=1 else ''}",
+                 key="translate_all_btn", type="primary", use_container_width=True):
+        memory = get_or_build_memory()
+        for store_items, ftype, source_col in [
+            (label_files, FileType.LABEL_FILE, None),
+            (data_files,  FileType.DATA_FILE,  "default value"),
+        ]:
+            for item in store_items:
+                try:
+                    df_check = load_file(io.BytesIO(item["data"]), file_name=item["name"])
+                    target_cols = [c for c in df_check.columns if c.strip().upper() in ("FR","FR-CA")]
+                except Exception:
+                    target_cols = []
+                config = PipelineConfig(
+                    file_type_override=ftype, source_lang="EN", target_lang="FR-CA",
+                    target_columns=target_cols if target_cols else ["FR","FR-CA"],
+                    source_column_override=source_col, use_bom=use_bom,
+                    provider=provider, api_key=api_key if api_key else None,
+                )
+                _run_translation(item, config, memory)
 
-    if translate_clicked:
-        for i, (uf, _df) in enumerate(valid_files):
-            result_key = f"result_{panel_key}_{i}"
-            config = PipelineConfig(
-                file_type_override=file_type,
-                source_lang="EN",
-                target_lang="FR-CA",
-                target_columns=target_cols if target_cols else ["FR", "FR-CA"],
-                source_column_override=source_col_override,
-                use_bom=use_bom,
-                provider=provider,
-                api_key=api_key if api_key else None,
-            )
-            render_processing_ui(uf, config, result_key)
+    _render_results(label_files, data_files)
 
-    # ── Show results for each file ────────────────────────────────
-    any_result = False
-    for i, (uf, _df) in enumerate(valid_files):
-        result_key = f"result_{panel_key}_{i}"
-        if result_key not in st.session_state:
-            continue
-        any_result = True
-        result: PipelineResult = st.session_state[result_key]
+def _run_translation(item: dict, config: PipelineConfig, memory: TranslationMemory) -> None:
+    result_key  = f"result_{item['sig']}"
+    status_box   = st.empty()
+    progress_box = st.empty()
+    status_box.markdown(f'''<div class="processing-card">
+    <div class="title">Translating\u2026</div><div class="sub">{item["name"]}</div>
+</div>''', unsafe_allow_html=True)
+    progress = progress_box.progress(0, text="Loading\u2026")
+    def _cb(step:str, pct:float)->None:
+        progress.progress(min(max(pct,0.0),1.0), text=step)
+    try:
+        result = run_pipeline(
+            main_file=io.BytesIO(item["data"]), main_filename=item["name"],
+            config=config, memory=memory, progress_callback=_cb,
+        )
+        st.session_state[result_key] = result
+    except Exception as exc:
+        st.error(f"Error translating **{item['name']}**: {exc}")
+    finally:
+        progress_box.empty()
+        status_box.empty()
 
-        if len(valid_files) > 1:
-            st.markdown(
-                f"""
-<div class="file-result-header">
-    <span class="file-index">{i + 1}</span>
-    <span class="file-name">{uf.name}</span>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
+def _render_results(label_files: list, data_files: list) -> None:
+    all_entries = ([(i,"Label File") for i in label_files] + [(i,"Data File") for i in data_files])
+    available = [(i,tl) for i,tl in all_entries if f"result_{i['sig']}" in st.session_state]
+    if not available:
+        return
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown('''<div class="section-wrap" style="margin-top:32px;"><h2>Results</h2></div>''',
+                unsafe_allow_html=True)
+    for idx, (item, type_label) in enumerate(available, 1):
+        result: PipelineResult = st.session_state[f"result_{item['sig']}"]
+        st.markdown(f'''<div class="file-result-header">
+    <span class="idx">{idx}</span>
+    <span class="fname">{item["name"]}</span>
+    <span class="ftype">{type_label}</span>
+</div>''', unsafe_allow_html=True)
         if result.validation.passed:
-            st.success("Validation passed. File structure and integrity were preserved.")
+            st.success("Validation passed \u2014 file integrity preserved.")
         else:
             st.error("Validation failed.")
             for issue in result.validation.issues:
                 st.warning(issue)
-
-        prov_counts: dict[str, int] = {}
-        for item in result.translations:
-            prov_counts[item.provenance.value] = prov_counts.get(item.provenance.value, 0) + 1
-        ref_count = (
-            prov_counts.get("reference_exact_match", 0)
-            + prov_counts.get("reference_normalized_match", 0)
-        )
-        cache_count = prov_counts.get("session_cache", 0)
-        fresh_count = prov_counts.get("fresh_translation", 0)
-        skipped_count = sum(v for k, v in prov_counts.items() if "skipped" in k)
-
-        st.markdown(
-            f"""
-<div class="prov-row">
-    <div class="prov-card">
-        <div class="value">{ref_count}</div>
-        <div class="label">Reference</div>
-    </div>
-    <div class="prov-card">
-        <div class="value">{cache_count}</div>
-        <div class="label">Cache</div>
-    </div>
-    <div class="prov-card">
-        <div class="value">{fresh_count}</div>
-        <div class="label">Fresh</div>
-    </div>
-    <div class="prov-card">
-        <div class="value">{skipped_count}</div>
-        <div class="label">Skipped</div>
-    </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+        prov: dict[str,int] = {}
+        for t in result.translations:
+            prov[t.provenance.value] = prov.get(t.provenance.value,0)+1
+        ref_c   = prov.get("reference_exact_match",0)+prov.get("reference_normalized_match",0)
+        cache_c = prov.get("session_cache",0)
+        fresh_c = prov.get("fresh_translation",0)
+        skip_c  = sum(v for k,v in prov.items() if "skipped" in k)
+        st.markdown(f'''<div class="prov-row">
+    <div class="prov-card"><div class="value">{ref_c}</div><div class="label">Reference</div></div>
+    <div class="prov-card"><div class="value">{cache_c}</div><div class="label">Cache</div></div>
+    <div class="prov-card"><div class="value">{fresh_c}</div><div class="label">Fresh</div></div>
+    <div class="prov-card"><div class="value">{skip_c}</div><div class="label">Skipped</div></div>
+</div>''', unsafe_allow_html=True)
         with st.expander("Translation Preview"):
-            interesting = [
-                t
-                for t in result.translations
-                if t.provenance
-                not in (
-                    Provenance.SKIPPED_EMPTY,
-                    Provenance.SKIPPED_NUMERIC,
-                    Provenance.SKIPPED_INTERNAL,
-                    Provenance.SKIPPED_PROTECTED,
-                )
-            ][:40]
+            interesting = [t for t in result.translations if t.provenance not in (
+                Provenance.SKIPPED_EMPTY,Provenance.SKIPPED_NUMERIC,
+                Provenance.SKIPPED_INTERNAL,Provenance.SKIPPED_PROTECTED)][:40]
             if interesting:
-                preview_rows = [
-                    {
-                        "Row": t.row_index,
-                        "Provenance": t.provenance.value.replace("_", " ").title(),
-                        "Original": t.original[:80],
-                        "Translated": t.translated[:80],
-                    }
-                    for t in interesting
-                ]
-                st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame([{
+                    "Row":t.row_index,"Provenance":t.provenance.value.replace("_"," ").title(),
+                    "Original":t.original[:80],"Translated":t.translated[:80],
+                } for t in interesting]), use_container_width=True, hide_index=True)
         with st.expander("Diagnostics & Notes"):
-            for k, v in sorted(result.diagnostics.items()):
-                st.text(f"{k}: {v}")
+            for k,v in sorted(result.diagnostics.items()): st.text(f"{k}: {v}")
             st.divider()
             st.dataframe(result.notes_df, use_container_width=True, hide_index=True)
-
-        render_download_section(result, f"{panel_key}_{i}")
-
-    # ── If multiple results are available, offer a ZIP download ──────
-    if any_result and len(valid_files) > 1:
-        results_available = [
-            st.session_state[f"result_{panel_key}_{i}"]
-            for i in range(len(valid_files))
-            if f"result_{panel_key}_{i}" in st.session_state
-        ]
-        if len(results_available) > 1:
-            _render_bulk_download(results_available, panel_key)
-
-
-def render_processing_ui(uploaded_file, config: PipelineConfig, result_key: str) -> None:
-    status_box = st.empty()
-    progress_box = st.empty()
-    status_box.markdown(
-        f"""
-<div class="processing-card">
-    <div class="title">Processing translation</div>
-    <div class="sub">Translating <strong>{uploaded_file.name}</strong> — building memory, translating content, and exporting result.</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    progress = progress_box.progress(0, text="Loading files...")
-
-    def update_progress(step: str, pct: float) -> None:
-        progress.progress(min(max(pct, 0.0), 1.0), text=step)
-
-    try:
-        result = run_pipeline(
-            main_file=io.BytesIO(uploaded_file.getvalue()),
-            main_filename=uploaded_file.name,
-            config=config,
-            memory=st.session_state.get("memory"),
-            progress_callback=update_progress,
-        )
-        st.session_state[result_key] = result
-        progress.progress(1.0, text="Exporting result...")
-        progress_box.empty()
-        status_box.empty()
-    except Exception as exc:
-        progress_box.empty()
-        status_box.empty()
-        st.error(f"Translation error for **{uploaded_file.name}**: {exc}")
-
-
-def render_download_section(result: PipelineResult, key_suffix: str) -> None:
-    st.markdown(
-        f"""
-<div class="done-area">
+        st.markdown(f'''<div class="done-area">
     <div class="done-arrow">{CURVED_ARROW_SVG}</div>
-    <h3>Download Translated File</h3>
-    <p>Your translated file is ready for Qualtrics import.</p>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    dl_col_left, dl_col_mid, dl_col_right = st.columns([1, 2, 1])
-    with dl_col_mid:
-        st.download_button(
-            label="Download Translated File",
-            data=result.translated_csv_bytes,
-            file_name=result.translated_filename,
-            mime="text/csv",
-            key=f"download_translated_{key_suffix}",
-            use_container_width=True,
-        )
-    with st.expander("Optional downloads and full output"):
-        st.markdown('<div class="secondary-downloads">', unsafe_allow_html=True)
-        st.download_button(
-            label="Download Notes Report",
-            data=result.notes_csv_bytes,
-            file_name=result.notes_filename,
-            mime="text/csv",
-            key=f"download_notes_{key_suffix}",
-            use_container_width=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.divider()
-        st.dataframe(result.translated_df, use_container_width=True, hide_index=True)
-
-
-def _render_bulk_download(results: list[PipelineResult], panel_key: str) -> None:
-    """Offer a ZIP containing all translated CSVs when multiple files were processed."""
-    import zipfile
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-<div class="section-wrap" style="margin-top:32px;">
-    <h2>Download All Files</h2>
-    <p>Download all translated files as a single ZIP archive.</p>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for result in results:
-            zf.writestr(result.translated_filename, result.translated_csv_bytes)
-    zip_buf.seek(0)
-
-    dl_col_left, dl_col_mid, dl_col_right = st.columns([1, 2, 1])
-    with dl_col_mid:
-        st.download_button(
-            label=f"Download All {len(results)} Translated Files (.zip)",
-            data=zip_buf.getvalue(),
-            file_name=f"translated_{panel_key}_files.zip",
-            mime="application/zip",
-            key=f"download_zip_{panel_key}",
-            use_container_width=True,
-        )
-
+    <h3>Download Translated File</h3><p>Ready for Qualtrics import.</p>
+</div>''', unsafe_allow_html=True)
+        dl_l,dl_m,dl_r = st.columns([1,2,1])
+        with dl_m:
+            st.download_button("Download Translated File", data=result.translated_csv_bytes,
+                file_name=result.translated_filename, mime="text/csv",
+                key=f"dl_{item['sig']}", use_container_width=True)
+        with st.expander("Optional downloads & full output"):
+            st.markdown('<div class="secondary-downloads">', unsafe_allow_html=True)
+            st.download_button("Download Notes Report", data=result.notes_csv_bytes,
+                file_name=result.notes_filename, mime="text/csv",
+                key=f"dl_notes_{item['sig']}", use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.divider()
+            st.dataframe(result.translated_df, use_container_width=True, hide_index=True)
+    if len(available) > 1:
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown('''<div class="section-wrap" style="margin-top:32px;">
+    <h2>Download All</h2><p>All translated files in one ZIP archive.</p>
+</div>''', unsafe_allow_html=True)
+        zb = io.BytesIO()
+        with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
+            for item,_ in available:
+                r = st.session_state[f"result_{item['sig']}"]
+                zf.writestr(r.translated_filename, r.translated_csv_bytes)
+        zb.seek(0)
+        zl,zm,zr = st.columns([1,2,1])
+        with zm:
+            st.download_button(f"Download All {len(available)} Translated Files (.zip)",
+                data=zb.getvalue(), file_name="translated_files.zip", mime="application/zip",
+                key="dl_all_zip", use_container_width=True)
 
 def render_footer() -> None:
-    st.markdown(
-        """
-<div class="app-footer">
+    st.markdown('''<div class="app-footer">
     Qualtrics Dashboard Translator &middot; Powered by Argos Translate &middot; Free &amp; Offline
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+</div>''', unsafe_allow_html=True)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 # APP
-# ═══════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
 def main() -> None:
-    inject_css()
+    init_stores()
+    st.markdown(CSS, unsafe_allow_html=True)
     render_header()
     use_bom, provider, api_key = render_sidebar()
     render_reference_upload()
-    render_file_selection(use_bom, provider, api_key)
+    render_glossary()
+    render_translate_section(use_bom, provider, api_key)
     render_footer()
-
 
 main()
